@@ -4,3 +4,9 @@
 .httr-oauth
 .DS_Store
 .quarto
+
+# Compiled C/C++ artifacts
+*.o
+*.so
+*.dll
+*.a
