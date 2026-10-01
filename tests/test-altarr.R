@@ -163,4 +163,12 @@ check(altarr_extract(zx, , , ), want, "CF unpacking")
 check(zx[cbind(c(2, 7), c(3, 5), c(4, 9))], want[cbind(c(2, 7), c(3, 5), c(4, 9))], "packed points")
 check(altarr_zarr_v2(zdir, unpack = FALSE)[2, 3, 4], -32767, "unpack = FALSE")
 
+## ---- a virtual array larger than R's maximum vector length is refused ---
+r <- try(altarr(c(2e9, 2e9, 2e3), c(1e5, 1e5, 1e3), function(chunks) list()),
+         silent = TRUE)
+stopifnot(inherits(r, "try-error"), grepl("maximum vector length", r))
+## just under the limit is fine, and shape costs nothing
+big_ok <- altarr(c(1e9, 1e6, 4), c(1e5, 1e5, 4), function(chunks) list())  # 4e15 values
+stopifnot(length(dim(big_ok)) == 3L, altarr_stats(big_ok)[["fetch_calls"]] == 0)
+
 cat("all tests passed\n")

@@ -329,14 +329,20 @@ static SEXP make_spec(SEXP dim, SEXP chunk, SEXP fetch)
     if (!isFunction(fetch)) error("altarr: 'fetch' must be a function");
     int k = LENGTH(dim);
     SEXP nch = PROTECT(allocVector(INTSXP, k));
-    double total = 1;
+    double total = 1, len = 1;
     for (int d = 0; d < k; d++) {
         int dd = INTEGER(dim)[d], cc = INTEGER(chunk)[d];
         if (dd == NA_INTEGER || dd < 1 || cc == NA_INTEGER || cc < 1)
             error("altarr: dims and chunk sizes must be positive");
         INTEGER(nch)[d] = (dd + cc - 1) / cc;
         total *= INTEGER(nch)[d];
+        len *= dd;
     }
+    /* A virtual array is never allocated, so its size is limited only by
+       R's maximum vector length (2^52 values), which Length() must respect. */
+    if (len > (double) R_XLEN_T_MAX)
+        error("altarr: array has %.0f values, more than R's maximum vector "
+              "length (%.0f)", len, (double) R_XLEN_T_MAX);
     if (total > R_XLEN_T_MAX) error("altarr: chunk grid too large");
     SEXP spec = PROTECT(allocVector(VECSXP, S_LEN));
     SET_VECTOR_ELT(spec, S_DIM, dim);
