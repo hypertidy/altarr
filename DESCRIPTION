@@ -1,0 +1,14 @@
+Package: altarr
+Title: Lazy Chunked Arrays as ALTREP Vectors
+Version: 0.0.1
+Authors@R: person("Michael", "Sumner", email = "mdsumner@gmail.com", role = c("aut", "cre"))
+Description: A prototype exploring how far base R array indexing can drive
+    planned reads of remote, chunked, encoded arrays when the array is an
+    ALTREP vector with a 'dim' attribute and no class. Chunks come from a
+    user-supplied fetch function, so any store (object storage, 'Zarr',
+    'GDAL') can sit behind it.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Depends: R (>= 3.6.0)
+Imports: stats
+Config/roxygen2/version: 8.1.0

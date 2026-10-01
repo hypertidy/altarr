@@ -1,0 +1,8 @@
+useDynLib(altarr, .registration = TRUE)
+export(altarr)
+export(is_altarr)
+export(altarr_stats)
+export(altarr_reset)
+export(altarr_extract)
+export(altarr_plan)
+export(altarr_zarr_v2)
