@@ -114,8 +114,32 @@ against an array written by zarr-python (`inst/examples/make-zarr.py`).
 - Fetch is called on R's main thread. Concurrency belongs inside the fetch
   implementation (Rust/object_store, GDAL), never touching the R API
   off-thread.
-- Coordinates are still dimnames, which must be character. That is the one
-  gap ALTREP does not touch.
+- Coordinates are still dimnames, which must be character. Lazy coordinates
+  (below) carry regular grids through `[` without that cost; irregular
+  numeric coordinates are still a question for base R.
+
+## Lazy coordinates
+
+`altarr_coord(offset, step, n)` is an ALTREP *character* vector that holds
+only three numbers and formats each label on demand. Base R's `[` subsets
+dimnames through the same `ExtractSubset()` it uses for data, which offers
+ALTREP `Extract_subset` first, so a regular slice of a lazy coordinate comes
+back as another lazy coordinate. That works on any array, lazy or not:
+
+```r
+lon <- altarr_coord(100, 0.25, 720)
+lat <- altarr_coord(90, -0.25, 160)
+a <- array(0, c(720, 160), dimnames = list(lon = lon, lat = lat))
+b <- a[101:200, seq(1, 160, by = 4)]   # dimnames still lazy: no strings built
+altarr_coord_values(colnames(b))       # exact numbers from offset and step
+a["100.5", "89.75"]                    # label matching still works
+```
+
+Tested and lazy throughout: `dimnames<-`, `[` (including strided and
+reversed slices), dropping to a vector, `aperm()`, printing, and
+`saveRDS()`/`readRDS()`. Irregular subsets fall back to ordinary strings.
+`as_altarr_coord(values)` makes a lazy coordinate from regularly spaced
+numbers. No change to R was needed.
 
 ## Why C here
 
@@ -130,6 +154,7 @@ touching the ALTREP layer.
 - `src/altarr.c`: the ALTREP class (`Length`, `Elt`, `Extract_subset`,
   `Dataptr`, `Duplicate`, `Serialized_state`, `Inspect`) and the hyperslab.
 - `R/altarr.R`: constructor, `altarr_extract()`, `altarr_plan()`, counters.
+- `src/coord.c`, `R/coord.R`: lazy coordinates for dimnames.
 - `R/zarr.R`: `altarr_zarr_v2()`.
 - `tests/test-altarr.R`: every path checked against base R with `identical()`.
 - `inst/examples/three-paths.R`: the measurements above.

@@ -540,7 +540,14 @@ static SEXP C_altarr_hyperslab(SEXP x, SEXP subs)
     return res;
 }
 
+/* lazy coordinates, src/coord.c */
+SEXP C_coord_new(SEXP offset, SEXP step, SEXP n);
+SEXP C_coord_info(SEXP x);
+void altarr_init_coord(DllInfo *dll);
+
 static const R_CallMethodDef CallEntries[] = {
+    {"C_coord_new", (DL_FUNC) &C_coord_new, 3},
+    {"C_coord_info", (DL_FUNC) &C_coord_info, 1},
     {"C_altarr_new", (DL_FUNC) &C_altarr_new, 3},
     {"C_altarr_is", (DL_FUNC) &C_altarr_is, 1},
     {"C_altarr_info", (DL_FUNC) &C_altarr_info, 1},
@@ -563,6 +570,8 @@ void R_init_altarr(DllInfo *dll)
     R_set_altvec_Dataptr_or_null_method(altarr_class, altarr_Dataptr_or_null);
     R_set_altvec_Extract_subset_method(altarr_class, altarr_Extract_subset);
     R_set_altreal_Elt_method(altarr_class, altarr_Elt);
+
+    altarr_init_coord(dll);
 
     R_registerRoutines(dll, NULL, CallEntries, NULL, NULL);
     R_useDynamicSymbols(dll, FALSE);

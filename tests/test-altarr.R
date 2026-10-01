@@ -171,4 +171,51 @@ stopifnot(inherits(r, "try-error"), grepl("maximum vector length", r))
 big_ok <- altarr(c(1e9, 1e6, 4), c(1e5, 1e5, 4), function(chunks) list())  # 4e15 values
 stopifnot(length(dim(big_ok)) == 3L, altarr_stats(big_ok)[["fetch_calls"]] == 0)
 
+## ---- lazy coordinates as dimnames ----------------------------------------
+lazy <- function(v) {
+  info <- .Call(altarr:::C_coord_info, v)
+  !is.null(info) && !isTRUE(attr(info, "materialized"))
+}
+plain <- function(o, s, n) sprintf("%.15g", o + s * (seq_len(n) - 1))
+lon <- altarr_coord(100, 0.25, 720)
+lat <- altarr_coord(90, -0.25, 160)          # descending, as many grids are
+check(lon[], plain(100, 0.25, 720), "coord labels")
+check(lat[1:3], c("90", "89.75", "89.5"), "descending labels")
+ca <- array(as.double(seq_len(720 * 160 * 2)), c(720L, 160L, 2L),
+            dimnames = list(lon = lon, lat = lat, time = c("t1", "t2")))
+stopifnot(lazy(dimnames(ca)$lon), lazy(dimnames(ca)$lat))
+cb <- ca[101:200, seq(1, 160, by = 4), 2]
+stopifnot(lazy(dimnames(cb)$lon), lazy(dimnames(cb)$lat))
+check(dimnames(cb)$lat, plain(90, -1, 40), "strided slice")
+cr <- ca[10:1, 1, 1]
+stopifnot(lazy(names(cr)))
+check(names(cr), plain(102.25, -0.25, 10), "reversed slice")
+ci <- ca[c(5, 1, 9), 1, 1]
+stopifnot(!lazy(names(ci)))
+check(names(ci), c("101", "100", "102"), "irregular falls back")
+check(ca["100.5", "89.75", 1], ca[3, 2, 1], "label matching")
+stopifnot(lazy(dimnames(aperm(ca, c(2, 1, 3)))$lon))
+f2 <- tempfile(fileext = ".rds"); saveRDS(ca, f2); ca2 <- readRDS(f2)
+stopifnot(lazy(dimnames(ca2)$lon), identical(dimnames(ca2), dimnames(ca)))
+check(altarr_coord_values(dimnames(cb)$lat), 90 - (seq_len(40) - 1), "exact values")
+check(altarr_coord_values(names(ci)), c(101, 100, 102), "values from plain labels")
+stopifnot(lazy(as_altarr_coord(seq(-180, 179.5, by = 0.5))),
+          !lazy(as_altarr_coord(c(1, 2, 4))))
+mod <- lon; mod[1] <- "first"
+check(mod[1:2], c("first", "100.25"), "assignment materializes a copy")
+stopifnot(lazy(lon))
+
+## ...and on an altarr array, through both paths
+cd <- dim(ca); ccs <- c(60L, 40L, 1L)
+cgen <- function(ch) lapply(seq_len(nrow(ch)), function(r) {
+  st <- ch[r, ] * ccs + 1L; en <- pmin(st + ccs - 1L, cd)
+  as.vector(ca[st[1]:en[1], st[2]:en[2], st[3]:en[3], drop = FALSE])
+})
+cx <- altarr(cd, ccs, cgen, dimnames = dimnames(ca))
+cy <- cx[101:200, seq(1, 160, by = 4), 2]
+stopifnot(lazy(dimnames(cy)$lon), lazy(dimnames(cy)$lat))
+check(cy, cb, "altarr x[i,j,k] with lazy coords")
+check(altarr_extract(cx, 101:200, seq(1, 160, by = 4), 2), cb, "hyperslab with lazy coords")
+stopifnot(lazy(dimnames(altarr_extract(cx, 101:200, 1:3, 1))$lon))
+
 cat("all tests passed\n")
