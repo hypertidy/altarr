@@ -76,7 +76,13 @@ adds no data model, and returning `NULL` keeps today's behaviour.
 ## What else comes for free
 
 - `dim()`, `length()`, `str()`: no reads.
-- A chunk cache, so repeat reads cost nothing.
+- A chunk cache, so repeat reads cost nothing. It is bounded: least
+  recently used chunks are evicted to keep it within
+  `getOption("altarr.cache_bytes")` (default 256 MiB, per array; a copy
+  shares its original's cache). Each request assembles from its own list of
+  chunks, so eviction never takes a chunk away from a request still using
+  it, and materialization fills its result directly rather than through the
+  cache, so it works under any budget, including 0.
 - Copy-on-modify works: `y <- x; y[1, 1, 1] <- 0` materializes `y` only.
 - Changing attributes on a shared object makes R wrap it in its own
   `wrapper` ALTREP class; the wrapper forwards `Extract_subset`, so planning
@@ -131,8 +137,6 @@ against an array written by zarr-python (`inst/examples/make-zarr.py`).
 - Lazy *reads*, not lazy compute. Anything that needs the data pointer
   materializes, and that is refused above
   `getOption("altarr.max_materialize", 1e6)` values.
-- The cache is unbounded (one slot per chunk in the grid). It needs an LRU
-  and a byte budget.
 - Fetch is called on R's main thread. Concurrency belongs inside the fetch
   implementation (Rust/object_store, GDAL), never touching the R API
   off-thread.

@@ -220,4 +220,50 @@ ep2 <- altarr_example_zarr(dim = c(5L, 3L), chunk = c(2L, 2L))   # ragged 2-d
 check(altarr_extract(altarr_zarr_v2(ep2), , ), array(as.double(0:14), c(5L, 3L)),
       "example 2-d ragged")
 
+## ---- bounded cache: LRU with a byte budget --------------------------------
+bd <- c(37L, 29L, 11L); bcs <- c(8L, 7L, 3L)          # 100 ragged chunks
+set.seed(11)
+bref <- array(rnorm(prod(bd)), bd); bref[sample(length(bref), 20)] <- NA
+bgen <- function(ch) lapply(seq_len(nrow(ch)), function(r) {
+  st <- ch[r, ] * bcs + 1L; en <- pmin(st + bcs - 1L, bd)
+  as.vector(bref[st[1]:en[1], st[2]:en[2], st[3]:en[3], drop = FALSE])
+})
+chunk_bytes <- prod(bcs) * 8
+old <- options(altarr.max_materialize = 1e9)
+set.seed(2)
+for (b in c(0, chunk_bytes / 2, chunk_bytes * 3, chunk_bytes * 20)) {
+  options(altarr.cache_bytes = b)
+  bx <- altarr(bd, bcs, bgen)
+  for (rep in 1:15) {
+    i <- sort(sample(bd[1], 12)); j <- sample(bd[2], 5); k <- sample(bd[3], 3)
+    check(bx[i, j, k], bref[i, j, k], "Elt path under a budget")
+    check(altarr_extract(bx, i, j, k), bref[i, j, k], "hyperslab under a budget")
+    m <- cbind(sample(bd[1], 30, TRUE), sample(bd[2], 30, TRUE), sample(bd[3], 30, TRUE))
+    check(bx[m], bref[m], "Extract_subset under a budget")
+    stopifnot(altarr_stats(bx)[["cache_bytes"]] <= b)
+  }
+  by <- bx; by[1, 1, 1] <- 99                         # materialize under the budget
+  check(by[-1], bref[-1], "materialize under a budget")
+}
+stopifnot(altarr_stats(bx)[["evictions"]] > 0)
+## least recently used goes first
+options(altarr.cache_bytes = 2 * chunk_bytes)
+lx <- altarr(bd, bcs, bgen)
+invisible(lx[1, 1, 1]); invisible(lx[9, 1, 1])        # chunks A and B
+invisible(lx[2, 1, 1])                                # touch A
+invisible(lx[17, 1, 1])                               # C evicts B, not A
+altarr_reset(lx, cache = FALSE)
+invisible(lx[3, 1, 1]); stopifnot(altarr_stats(lx)[["fetch_calls"]] == 0)
+invisible(lx[10, 1, 1]); stopifnot(altarr_stats(lx)[["fetch_calls"]] == 1)
+## materializing a copy no longer fills the shared cache
+options(altarr.cache_bytes = 1e9)
+cx3 <- altarr(bd, bcs, bgen)
+invisible(cx3[1, 1, 1])
+cy <- cx3; cy[1, 1, 1] <- 0
+stopifnot(altarr_stats(cx3)[["chunks_cached"]] == 1)
+## reset clears bytes with the chunks
+altarr_reset(cx3)
+stopifnot(altarr_stats(cx3)[["cache_bytes"]] == 0, altarr_stats(cx3)[["chunks_cached"]] == 0)
+options(old)
+
 cat("all tests passed\n")

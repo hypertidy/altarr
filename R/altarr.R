@@ -36,6 +36,11 @@ is_altarr <- function(x) .Call(C_altarr_is, x)
 #' counts whole-array `sum()`, `min()` and `max()` calls, which stream the
 #' chunk grid in batches of `getOption("altarr.batch_chunks", 64)` chunks
 #' (one fetch call per batch) without caching what they read.
+#' `evictions` counts chunks dropped from the cache to keep it within
+#' its budget. Also reported: `cache_bytes` (bytes currently cached) and
+#' `cache_budget` (`getOption("altarr.cache_bytes")`, default 256 MiB).
+#' The cache is least recently used first, and shared by an array and
+#' its copies.
 #' @param x an altarr array
 #' @export
 altarr_stats <- function(x) .Call(C_altarr_info, x)
