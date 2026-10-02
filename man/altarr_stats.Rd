@@ -17,6 +17,8 @@ counts planned subset calls (`x[i]`, `x[cbind(...)]`), `hyperslab` counts
 counts whole-array `sum()`, `min()` and `max()` calls, which stream the
 chunk grid in batches of `getOption("altarr.batch_chunks", 64)` chunks
 (one fetch call per batch) without caching what they read.
+`region` counts contiguous-run reads from functions R iterates by region
+(`mean()`, `prod()`, `anyNA()`, and reductions on R's wrapper class).
 `evictions` counts chunks dropped from the cache to keep it within
 its budget. Also reported: `cache_bytes` (bytes currently cached) and
 `cache_budget` (`getOption("altarr.cache_bytes")`, default 256 MiB).

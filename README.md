@@ -108,12 +108,31 @@ streamed without materializing, but through 2.4 million `Elt` calls and 48
 serial fetches that filled the cache. With them it is 0 `Elt` calls and 1
 fetch call (3 with batches of 16), and nothing is cached.
 
-Two gaps remain. `mean()`, `prod()` and `which()` iterate by region with no
-class hook, so they still read element by element. And R's internal wrapper
-class (made by `dimnames(y) <- ...` after `y <- x`) forwards
-`Extract_subset` but not `Sum`/`Min`/`Max`, so reductions on a wrapped array
-fall back to the element path: still correct, just slow. That second one is
-a small, concrete item for R core.
+`mean()`, `prod()` and `anyNA()` have no class hook: R iterates them by
+region, asking for contiguous runs (usually 512 values) from start to end.
+altarr's `Get_region` method serves those runs from the chunks they touch,
+and when the runs arrive in sequence (a scan) it prefetches the whole chunk
+layer the scan has entered (all chunks sharing the last dimension's chunk
+coordinate, one contiguous block in column-major order), in batches, if the
+layer fits the cache budget. Isolated region requests never prefetch.
+
+On the same 2.4 million values with 20 ms latency per fetch call:
+
+| | before | after |
+|---|---:|---:|
+| `mean(x)` | 1.72 s, 48 fetch calls | 0.49 s, 4 fetch calls |
+| `prod(x)` | 1.31 s, 48 fetch calls | 0.15 s, 4 fetch calls |
+| `anyNA(x)` | 1.27 s, 48 fetch calls | 0.16 s, 4 fetch calls |
+
+R's internal wrapper class (made by `dimnames(y) <- ...` after `y <- x`)
+forwards `Extract_subset` but not `Sum`/`Min`/`Max`. It does forward region
+reads, though, and R falls back to them, so `sum()`, `min()` and `max()` on
+a wrapped array are planned too. Forwarding the reduction methods would
+still be a tidy small change for R core.
+
+Still element by element: `is.na()`, which has no ALTREP hook, and so
+`mean(x, na.rm = TRUE)`, which calls `x[!is.na(x)]`. The subset itself is
+planned; the `is.na()` pass is not.
 
 ## The fetch contract
 
