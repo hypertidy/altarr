@@ -2,14 +2,17 @@
 #'
 #' A deliberately small reader, to show that a real chunked, compressed
 #' store fits behind the fetch contract in a few lines. Handles Zarr v2
-#' arrays with dtype `<f8`, `<f4`, `<i4`, `<i2` or `|u1`, compressor `null`
-#' or `zlib`, order `C` or `F`, and missing chunk files (read as
-#' `fill_value`). Zarr's padded edge chunks are clipped.
+#' arrays with dtype `<f8`, `<f4`, `<i4`, `<i2`, `|i1`, `<u2`, `|u1` or
+#' `|b1`, compressor `null` or `zlib`, order `C` or `F`, and missing chunk
+#' files (read as `fill_value`). Zarr's padded edge chunks are clipped.
 #'
-#' With `unpack = TRUE`, CF packing attributes found in `.zattrs` are
-#' applied inside the fetch: values equal to `_FillValue` or
-#' `missing_value` become `NA`, then `scale_factor` and `add_offset` are
-#' applied. The Zarr `fill_value` itself is not treated as missing.
+#' The array's type follows the dtype: floats give a double array, integers
+#' an integer array, `|b1` a logical array. With `unpack = TRUE`, CF
+#' packing attributes found in `.zattrs` are applied inside the fetch:
+#' values equal to `_FillValue` or `missing_value` become `NA`, and if
+#' `scale_factor` or `add_offset` is present the array is double, holding
+#' the unpacked values. The Zarr `fill_value` itself is not treated as
+#' missing.
 #'
 #' A C-order Zarr array of shape `(s1, ..., sn)` is returned with R `dim`
 #' `c(sn, ..., s1)`: C-order bytes are already column-major for the
@@ -49,7 +52,24 @@ altarr_zarr_v2 <- function(path, unpack = TRUE) {
   sep <- str_field("dimension_separator")
   if (is.na(sep)) sep <- "."
   comp <- if (grepl('"compressor"\\s*:\\s*null', meta)) "none" else str_field("id")
-  fill <- num_field(meta, "fill_value")
+
+  ty <- switch(dtype,
+    "<f8" = list(what = "double", size = 8L, kind = "double"),
+    "<f4" = list(what = "double", size = 4L, kind = "double"),
+    "<i4" = list(what = "integer", size = 4L, kind = "integer"),
+    "<i2" = list(what = "integer", size = 2L, kind = "integer"),
+    "|i1" = list(what = "integer", size = 1L, kind = "integer"),
+    "<u2" = list(what = "integer", size = 2L, kind = "integer", signed = FALSE),
+    "|u1" = list(what = "integer", size = 1L, kind = "integer", signed = FALSE),
+    "|b1" = list(what = "integer", size = 1L, kind = "logical", signed = FALSE),
+    stop("unsupported dtype ", dtype))
+  if (!comp %in% c("none", "zlib")) stop("unsupported compressor ", comp)
+
+  ## Zarr fill_value: a number, true/false for booleans, or null
+  fill <- if (ty$kind == "logical") {
+    if (grepl('"fill_value"\\s*:\\s*true', meta)) 1 else
+    if (grepl('"fill_value"\\s*:\\s*false', meta)) 0 else NA_real_
+  } else num_field(meta, "fill_value")
 
   scale <- 1; offset <- 0; nodata <- numeric(0)
   if (unpack && nzchar(attrs)) {
@@ -58,21 +78,19 @@ altarr_zarr_v2 <- function(path, unpack = TRUE) {
     nodata <- stats::na.omit(c(num_field(attrs, "_FillValue"),
                                num_field(attrs, "missing_value")))
   }
+  ## the array's type: unpacking with scale/offset gives doubles
+  out_type <- if (ty$kind == "integer" && (scale != 1 || offset != 0)) "double" else ty$kind
   decode <- function(v) {
-    v <- as.double(v)
-    if (length(nodata)) v[v %in% nodata] <- NA_real_
-    if (scale != 1 || offset != 0) v <- v * scale + offset
-    v
+    if (length(nodata)) v[v %in% nodata] <- NA
+    switch(out_type,
+      double = {
+        v <- as.double(v)
+        if (scale != 1 || offset != 0) v <- v * scale + offset
+        v
+      },
+      integer = as.integer(v),
+      logical = as.logical(v))
   }
-
-  ty <- switch(dtype,
-    "<f8" = list(what = "double", size = 8L),
-    "<f4" = list(what = "double", size = 4L),
-    "<i4" = list(what = "integer", size = 4L),
-    "<i2" = list(what = "integer", size = 2L),
-    "|u1" = list(what = "integer", size = 1L, signed = FALSE),
-    stop("unsupported dtype ", dtype))
-  if (!comp %in% c("none", "zlib")) stop("unsupported compressor ", comp)
 
   ## R dims: reversed for C order
   rev_c <- identical(order, "C")
@@ -101,5 +119,5 @@ altarr_zarr_v2 <- function(path, unpack = TRUE) {
       decode(v)
     })
   }
-  altarr(d, cs, fetch)
+  altarr(d, cs, fetch, type = out_type)
 }

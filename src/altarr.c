@@ -1,16 +1,17 @@
 /*
- * altarr: a lazily-read, chunked real array as an ALTREP vector.
+ * altarr: a lazily-read, chunked array as an ALTREP vector.
  *
- * The object is a plain double vector with a 'dim' attribute and no class.
- * Values live in chunks that are obtained on demand from a user-supplied
- * fetch function, so the "remote" can be anything: object storage, a Zarr
- * store, GDAL, or a generator in tests.
+ * The object is a plain double, integer or logical vector with a 'dim'
+ * attribute and no class. Values live in chunks that are obtained on demand
+ * from a user-supplied fetch function, so the "remote" can be anything:
+ * object storage, a Zarr store, GDAL, or a generator in tests.
  *
- * What each base R entry point does with it (R >= 3.5, checked on 4.3):
+ * What each base R entry point does with it (R >= 3.6, checked on 4.3):
  *
  *   x[i]            linear      -> ExtractSubset -> Extract_subset method
  *   x[cbind(i,j,k)] matrix-idx  -> mat2indsub -> ExtractSubset -> Extract_subset
  *   x[i, j, k]      rectangular -> ArraySubset/MatrixSubset -> Elt, per element
+ *   mean(x) etc     by region   -> Get_region, contiguous runs
  *   x * 2, print(x) etc         -> Dataptr (materialize, guarded by an option)
  *
  * Extract_subset sees the whole index set at once, so it can plan: find the
@@ -21,11 +22,18 @@
  * normalized per-dimension subscripts ('subs') to an ALTREP method: plan the
  * cartesian product of touched chunks, fetch once, assemble.
  *
+ * One engine serves three ALTREP classes: altarr_real (double),
+ * altarr_integer and altarr_logical. Integer and logical both use R's int
+ * storage, so the engine has two storage paths, double and int. Chunks are
+ * cached in the array's own type.
+ *
  * Fetch contract (R function):
  *   fetch(chunks) where 'chunks' is an integer matrix, one row per chunk,
  *   one column per dimension, 0-based chunk coordinates. It returns a list
- *   of numeric vectors, one per row, each the chunk's values in column-major
- *   order, clipped to the array edge (edge chunks are NOT padded).
+ *   of vectors, one per row, each the chunk's values in column-major order,
+ *   clipped to the array edge (edge chunks are NOT padded). Chunks should be
+ *   of the array's type; other numeric or logical vectors are coerced as
+ *   as.double(), as.integer() or as.logical() would.
  */
 
 #include <string.h>
@@ -37,13 +45,14 @@
 #include <R_ext/Altrep.h>
 #include <R_ext/Rdynload.h>
 
-static R_altrep_class_t altarr_class;
+static R_altrep_class_t altarr_real_class, altarr_int_class, altarr_lgl_class;
 
 /* data1: shared spec (shared by duplicates, so the cache is shared too) */
 enum { S_DIM, S_CHUNK, S_FETCH, S_NCHUNK, S_CACHE, S_STATS, S_TICK, S_STATE,
-       S_LEN };
+       S_TYPE, S_LEN };
 /* S_TICK: per chunk, the clock value when it was last used (for LRU)
-   S_STATE: c(clock, bytes currently cached, end of the last region read) */
+   S_STATE: c(clock, bytes currently cached, end of the last region read)
+   S_TYPE: the array's SEXPTYPE (REALSXP, INTSXP or LGLSXP) */
 /* counters */
 enum { ST_ELT, ST_FETCH_CALLS, ST_CHUNKS_FETCHED, ST_EXTRACT,
        ST_HYPERSLAB, ST_MATERIALIZE, ST_REDUCE, ST_EVICT, ST_REGION, ST_LEN };
@@ -54,6 +63,38 @@ static const char *stat_names[ST_LEN] = {
 /* data2: the materialized vector, or R_NilValue */
 
 #define SPEC(x) R_altrep_data1(x)
+
+static inline int spec_type(SEXP spec)
+{
+    return INTEGER(VECTOR_ELT(spec, S_TYPE))[0];
+}
+
+static inline double elt_bytes(int type)
+{
+    return type == REALSXP ? (double) sizeof(double) : (double) sizeof(int);
+}
+
+static inline R_altrep_class_t class_for(int type)
+{
+    return type == INTSXP ? altarr_int_class :
+           type == LGLSXP ? altarr_lgl_class : altarr_real_class;
+}
+
+/* int storage of an integer or logical vector */
+static inline int *iptr(SEXP v)
+{
+    return TYPEOF(v) == LGLSXP ? LOGICAL(v) : INTEGER(v);
+}
+
+static inline const int *iptr_ro(SEXP v)
+{
+    return TYPEOF(v) == LGLSXP ? LOGICAL_RO(v) : INTEGER_RO(v);
+}
+
+static inline void *data_ptr(SEXP v)
+{
+    return TYPEOF(v) == REALSXP ? (void *) REAL(v) : (void *) iptr(v);
+}
 
 static inline void bump(SEXP spec, int k, double by)
 {
@@ -105,12 +146,13 @@ static R_xlen_t chunk_size(SEXP spec, R_xlen_t cid)
 }
 
 /* Call the R fetch function ONCE for chunks 'need[0..m)' and return a list
-   of validated double vectors, one per chunk (caller protects). Nothing is
-   cached here, so a reduction can stream through bounded memory. */
+   of validated vectors of the array's type, one per chunk (caller
+   protects). Nothing is cached here, so a reduction can stream through
+   bounded memory. */
 static SEXP fetch_raw(SEXP spec, const R_xlen_t *need, R_xlen_t m)
 {
     if (m > INT_MAX) error("altarr: too many chunks in one request");
-    int k = LENGTH(VECTOR_ELT(spec, S_DIM));
+    int k = LENGTH(VECTOR_ELT(spec, S_DIM)), type = spec_type(spec);
     const int *nch = INTEGER(VECTOR_ELT(spec, S_NCHUNK));
     SEXP mat = PROTECT(allocMatrix(INTSXP, (int) m, k));
     int *pm = INTEGER(mat);
@@ -129,10 +171,11 @@ static SEXP fetch_raw(SEXP spec, const R_xlen_t *need, R_xlen_t m)
     SEXP out = PROTECT(allocVector(VECSXP, m));
     for (R_xlen_t j = 0; j < m; j++) {
         SEXP v = VECTOR_ELT(res, j);
-        if (TYPEOF(v) != REALSXP) {
+        if (TYPEOF(v) != type) {
             if (!isNumeric(v) && !isLogical(v))
-                error("altarr: fetch() returned a non-numeric chunk");
-            v = coerceVector(v, REALSXP);
+                error("altarr: fetch() returned a chunk that is not numeric "
+                      "or logical");
+            v = coerceVector(v, type);
         }
         PROTECT(v);
         R_xlen_t want = chunk_size(spec, need[j]);
@@ -152,14 +195,14 @@ static SEXP fetch_raw(SEXP spec, const R_xlen_t *need, R_xlen_t m)
 
 /* ---- the chunk cache: LRU with a byte budget --------------------------- */
 
-/* Each request (Elt, Extract_subset, the hyperslab) asks get_chunks() for
-   the chunks it needs and assembles from the list it gets back. The cache is
-   only a place to keep chunks for later requests: it holds at most
-   getOption("altarr.cache_bytes") bytes (default 256 MiB), evicting the
-   least recently used chunks first. Because a request holds its own
-   references, eviction can never take a chunk away from a request that is
-   still using it. The budget is per array (per shared recipe: a copy and its
-   original share one cache). */
+/* Each request (Elt, Extract_subset, the hyperslab, a region) asks
+   get_chunks() for the chunks it needs and assembles from the list it gets
+   back. The cache is only a place to keep chunks for later requests: it
+   holds at most getOption("altarr.cache_bytes") bytes (default 256 MiB),
+   evicting the least recently used chunks first. Because a request holds
+   its own references, eviction can never take a chunk away from a request
+   that is still using it. The budget is per array (per shared recipe: a
+   copy and its original share one cache). */
 
 #define CLOCK(spec) (REAL(VECTOR_ELT(spec, S_STATE))[0])
 #define BYTES(spec) (REAL(VECTOR_ELT(spec, S_STATE))[1])
@@ -177,7 +220,7 @@ static void cache_put(SEXP spec, R_xlen_t cid, SEXP v)
     if (VECTOR_ELT(cache, cid) != R_NilValue) return;
     SET_VECTOR_ELT(cache, cid, v);
     REAL(VECTOR_ELT(spec, S_TICK))[cid] = CLOCK(spec);
-    BYTES(spec) += (double) XLENGTH(v) * sizeof(double);
+    BYTES(spec) += (double) XLENGTH(v) * elt_bytes(TYPEOF(v));
 }
 
 static void cache_drop(SEXP spec, R_xlen_t cid)
@@ -185,7 +228,7 @@ static void cache_drop(SEXP spec, R_xlen_t cid)
     SEXP cache = VECTOR_ELT(spec, S_CACHE);
     SEXP v = VECTOR_ELT(cache, cid);
     if (v == R_NilValue) return;
-    BYTES(spec) -= (double) XLENGTH(v) * sizeof(double);
+    BYTES(spec) -= (double) XLENGTH(v) * elt_bytes(TYPEOF(v));
     SET_VECTOR_ELT(cache, cid, R_NilValue);
 }
 
@@ -289,8 +332,9 @@ static void locate(SEXP spec, R_xlen_t li, R_xlen_t *cid_out, R_xlen_t *off_out)
     *off_out = off;
 }
 
-/* value of element li (0-based); fetches its chunk alone if not cached */
-static double value_at(SEXP spec, R_xlen_t li)
+/* Element li (0-based) into *dv (double arrays) or *iv (int storage);
+   fetches its chunk alone if it is not cached. */
+static void read_elt(SEXP spec, R_xlen_t li, double *dv, int *iv)
 {
     R_xlen_t cid, off;
     locate(spec, li, &cid, &off);
@@ -299,21 +343,28 @@ static double value_at(SEXP spec, R_xlen_t li)
         /* advance the clock so a hit always counts as more recent than
            anything fetched before it */
         REAL(VECTOR_ELT(spec, S_TICK))[cid] = (CLOCK(spec) += 1);
-        return REAL(ch)[off];
+        if (dv) *dv = REAL_RO(ch)[off]; else *iv = iptr_ro(ch)[off];
+        return;
     }
     SEXP got = PROTECT(get_chunks(spec, &cid, 1));
-    double v = REAL(VECTOR_ELT(got, 0))[off];
+    ch = VECTOR_ELT(got, 0);
+    if (dv) *dv = REAL_RO(ch)[off]; else *iv = iptr_ro(ch)[off];
     UNPROTECT(1);
-    return v;
 }
 
-/* write chunk cid's values (clipped, column-major) into a full array */
-static void scatter_chunk(SEXP spec, R_xlen_t cid, const double *v, double *dest)
+/* write chunk cid's values (clipped, column-major) into a full array 'dest'
+   of the same type */
+static void scatter_chunk(SEXP spec, R_xlen_t cid, SEXP ch, SEXP dest)
 {
     const int *dim = INTEGER(VECTOR_ELT(spec, S_DIM));
     const int *cs = INTEGER(VECTOR_ELT(spec, S_CHUNK));
     const int *nch = INTEGER(VECTOR_ELT(spec, S_NCHUNK));
     int k = LENGTH(VECTOR_ELT(spec, S_DIM));
+    int is_real = TYPEOF(dest) == REALSXP;
+    const double *vd = is_real ? REAL_RO(ch) : NULL;
+    const int *vi = is_real ? NULL : iptr_ro(ch);
+    double *dd = is_real ? REAL(dest) : NULL;
+    int *di = is_real ? NULL : iptr(dest);
     R_xlen_t *start = (R_xlen_t *) R_alloc(k, sizeof(R_xlen_t));
     R_xlen_t *ext = (R_xlen_t *) R_alloc(k, sizeof(R_xlen_t));
     R_xlen_t *gstride = (R_xlen_t *) R_alloc(k, sizeof(R_xlen_t));
@@ -333,7 +384,7 @@ static void scatter_chunk(SEXP spec, R_xlen_t cid, const double *v, double *dest
     for (R_xlen_t i = 0; i < n; i++) {
         R_xlen_t g = 0;
         for (int d = 0; d < k; d++) g += (start[d] + ctr[d]) * gstride[d];
-        dest[g] = v[i];
+        if (is_real) dd[g] = vd[i]; else di[g] = vi[i];
         for (int d = 0; d < k; d++) {
             if (++ctr[d] < ext[d]) break;
             ctr[d] = 0;
@@ -341,22 +392,19 @@ static void scatter_chunk(SEXP spec, R_xlen_t cid, const double *v, double *dest
     }
 }
 
-static R_xlen_t batch_chunks(void);
+static R_xlen_t batch_chunks(void)
+{
+    double b = asReal(GetOption1(install("altarr.batch_chunks")));
+    if (ISNAN(b) || b < 1) b = 64;
+    if (b > 1e6) b = 1e6;
+    return (R_xlen_t) b;
+}
 
-/* ---- ALTREP methods ---------------------------------------------------- */
+/* ---- ALTREP methods shared by all three classes ------------------------ */
 
 static R_xlen_t altarr_Length(SEXP x)
 {
     return spec_length(SPEC(x));
-}
-
-static double altarr_Elt(SEXP x, R_xlen_t i)
-{
-    SEXP d2 = R_altrep_data2(x);
-    if (d2 != R_NilValue) return REAL(d2)[i];
-    SEXP spec = SPEC(x);
-    bump(spec, ST_ELT, 1);
-    return value_at(spec, i);
 }
 
 static void *altarr_Dataptr(SEXP x, Rboolean writable)
@@ -377,8 +425,7 @@ static void *altarr_Dataptr(SEXP x, Rboolean writable)
         SEXP cache = VECTOR_ELT(spec, S_CACHE);
         R_xlen_t nc = XLENGTH(cache), bsize = batch_chunks();
         R_xlen_t *need = (R_xlen_t *) R_alloc(bsize, sizeof(R_xlen_t));
-        d2 = PROTECT(allocVector(REALSXP, n));
-        double *p = REAL(d2);
+        d2 = PROTECT(allocVector(spec_type(spec), n));
         for (R_xlen_t b0 = 0; b0 < nc; b0 += bsize) {
             R_xlen_t b1 = b0 + bsize < nc ? b0 + bsize : nc, m = 0;
             for (R_xlen_t c = b0; c < b1; c++)
@@ -388,20 +435,20 @@ static void *altarr_Dataptr(SEXP x, Rboolean writable)
             for (R_xlen_t c = b0; c < b1; c++) {
                 SEXP ch = VECTOR_ELT(cache, c);
                 if (ch == R_NilValue) ch = VECTOR_ELT(fresh, j++);
-                scatter_chunk(spec, c, REAL_RO(ch), p);
+                scatter_chunk(spec, c, ch, d2);
             }
             UNPROTECT(1);
         }
         R_set_altrep_data2(x, d2);
         UNPROTECT(1);
     }
-    return (void *) REAL(d2);
+    return data_ptr(d2);
 }
 
 static const void *altarr_Dataptr_or_null(SEXP x)
 {
     SEXP d2 = R_altrep_data2(x);
-    return d2 == R_NilValue ? NULL : (const void *) REAL(d2);
+    return d2 == R_NilValue ? NULL : (const void *) data_ptr(d2);
 }
 
 /* Index semantics match EXTRACT_SUBSET_LOOP in src/main/subset.c:
@@ -441,13 +488,19 @@ static SEXP altarr_Extract_subset(SEXP x, SEXP indx, SEXP call)
     SEXP got = PROTECT(get_chunks(spec, cids, m));
 
     /* pass 2: assemble from this request's own chunks */
-    SEXP res = PROTECT(allocVector(REALSXP, n));
-    double *pr = REAL(res);
+    SEXP res = PROTECT(allocVector(spec_type(spec), n));
+    int is_real = TYPEOF(res) == REALSXP;
+    double *rd = is_real ? REAL(res) : NULL;
+    int *ri = is_real ? NULL : iptr(res);
     for (R_xlen_t i = 0; i < n; i++) {
-        if (li[i] < 0) { pr[i] = NA_REAL; continue; }
+        if (li[i] < 0) {
+            if (is_real) rd[i] = NA_REAL; else ri[i] = NA_INTEGER;
+            continue;
+        }
         R_xlen_t cid, off;
         locate(spec, li[i], &cid, &off);
-        pr[i] = REAL(VECTOR_ELT(got, pos[cid]))[off];
+        SEXP ch = VECTOR_ELT(got, pos[cid]);
+        if (is_real) rd[i] = REAL_RO(ch)[off]; else ri[i] = iptr_ro(ch)[off];
     }
     UNPROTECT(2);
     return res;
@@ -459,39 +512,41 @@ static SEXP altarr_Duplicate(SEXP x, Rboolean deep)
     if (R_altrep_data2(x) != R_NilValue) return NULL;
     /* lazy: a new wrapper over the same (immutable) recipe and cache;
        R copies the attributes */
-    return R_new_altrep(altarr_class, SPEC(x), R_NilValue);
+    return R_new_altrep(class_for(spec_type(SPEC(x))), SPEC(x), R_NilValue);
 }
 
-/* serialize the recipe, never the payload */
+/* serialize the recipe, never the payload: list(dim, chunk, fetch, type) */
 static SEXP altarr_Serialized_state(SEXP x)
 {
     SEXP spec = SPEC(x);
-    SEXP st = PROTECT(allocVector(VECSXP, 3));
+    SEXP st = PROTECT(allocVector(VECSXP, 4));
     SET_VECTOR_ELT(st, 0, VECTOR_ELT(spec, S_DIM));
     SET_VECTOR_ELT(st, 1, VECTOR_ELT(spec, S_CHUNK));
     SET_VECTOR_ELT(st, 2, VECTOR_ELT(spec, S_FETCH));
+    SET_VECTOR_ELT(st, 3, VECTOR_ELT(spec, S_TYPE));
     UNPROTECT(1);
     return st;
 }
 
-static SEXP make_spec(SEXP dim, SEXP chunk, SEXP fetch);
+static SEXP make_spec(SEXP dim, SEXP chunk, SEXP fetch, int type);
 
+/* recipes saved before typed arrays have three elements: they are double */
 static SEXP altarr_Unserialize(SEXP class, SEXP state)
 {
-    SEXP spec = PROTECT(make_spec(VECTOR_ELT(state, 0),
-                                  VECTOR_ELT(state, 1),
-                                  VECTOR_ELT(state, 2)));
-    SEXP x = R_new_altrep(altarr_class, spec, R_NilValue);
+    int type = XLENGTH(state) >= 4 ? asInteger(VECTOR_ELT(state, 3)) : REALSXP;
+    SEXP spec = PROTECT(make_spec(VECTOR_ELT(state, 0), VECTOR_ELT(state, 1),
+                                  VECTOR_ELT(state, 2), type));
+    SEXP x = R_new_altrep(class_for(type), spec, R_NilValue);
     UNPROTECT(1);
     return x;
 }
 
 static Rboolean altarr_Inspect(SEXP x, int pre, int deep, int pvec,
-                             void (*inspect_subtree)(SEXP, int, int, int))
+                               void (*inspect_subtree)(SEXP, int, int, int))
 {
     SEXP spec = SPEC(x);
     SEXP dim = VECTOR_ELT(spec, S_DIM), cs = VECTOR_ELT(spec, S_CHUNK);
-    Rprintf(" altarr dim [");
+    Rprintf(" altarr %s dim [", type2char(spec_type(spec)));
     for (int d = 0; d < LENGTH(dim); d++)
         Rprintf("%s%d", d ? "," : "", INTEGER(dim)[d]);
     Rprintf("] chunk [");
@@ -501,7 +556,31 @@ static Rboolean altarr_Inspect(SEXP x, int pre, int deep, int pvec,
     return TRUE;
 }
 
-/* ---- whole-array reductions ------------------------------------------- */
+/* ---- typed Elt ---------------------------------------------------------- */
+
+static double altarr_real_Elt(SEXP x, R_xlen_t i)
+{
+    SEXP d2 = R_altrep_data2(x);
+    if (d2 != R_NilValue) return REAL_RO(d2)[i];
+    SEXP spec = SPEC(x);
+    bump(spec, ST_ELT, 1);
+    double v;
+    read_elt(spec, i, &v, NULL);
+    return v;
+}
+
+static int altarr_int_Elt(SEXP x, R_xlen_t i)
+{
+    SEXP d2 = R_altrep_data2(x);
+    if (d2 != R_NilValue) return iptr_ro(d2)[i];
+    SEXP spec = SPEC(x);
+    bump(spec, ST_ELT, 1);
+    int v;
+    read_elt(spec, i, NULL, &v);
+    return v;
+}
+
+/* ---- whole-array reductions (double arrays) ---------------------------- */
 
 /* sum(), min() and max() with a single ALTREP argument go to these methods
    (do_summary in src/main/summary.c). They walk the chunk grid in batches
@@ -510,17 +589,13 @@ static Rboolean altarr_Inspect(SEXP x, int pre, int deep, int pvec,
    bounded by the batch. The arithmetic mirrors base R's rsum/rmin/rmax:
    long double accumulation for sum; for min/max any NA trumps NaN. Chunks
    are visited in chunk order, so a sum can differ from base R's linear-order
-   sum in the last bits. */
+   sum in the last bits.
+
+   Integer and logical arrays deliberately have no such methods: R then
+   reduces them with its own code over Get_region (planned, below), so
+   integer overflow, NA handling and result types are base R's exactly. */
 
 enum { RED_SUM, RED_MIN, RED_MAX };
-
-static R_xlen_t batch_chunks(void)
-{
-    double b = asReal(GetOption1(install("altarr.batch_chunks")));
-    if (ISNAN(b) || b < 1) b = 64;
-    if (b > 1e6) b = 1e6;
-    return (R_xlen_t) b;
-}
 
 static SEXP reduce_lazy(SEXP x, int op, Rboolean narm)
 {
@@ -584,12 +659,13 @@ static SEXP altarr_Sum(SEXP x, Rboolean narm) { return reduce_lazy(x, RED_SUM, n
 static SEXP altarr_Min(SEXP x, Rboolean narm) { return reduce_lazy(x, RED_MIN, narm); }
 static SEXP altarr_Max(SEXP x, Rboolean narm) { return reduce_lazy(x, RED_MAX, narm); }
 
-/* ---- region reads: mean(), prod(), anyNA(), ... ------------------------ */
+/* ---- region reads: mean(), prod(), anyNA(), which(), ... -------------- */
 
 /* Functions that iterate by region (ITERATE_BY_REGION in R's sources: mean,
-   prod, anyNA, and sum/min/max on R's wrapper class) ask for contiguous
-   runs of elements, typically 512 at a time, from the start of the array to
-   the end. A region read takes exactly the chunks its run touches, through
+   prod, anyNA, which on logical vectors, reductions of integer and logical
+   vectors, and sum/min/max on R's wrapper class) ask for contiguous runs of
+   elements, typically 512 at a time, from the start of the array to the
+   end. A region read takes exactly the chunks its run touches, through
    get_chunks(), so eviction stays safe.
 
    A scan is detected when a region starts at 0 or exactly where the last
@@ -608,7 +684,7 @@ static void prefetch_scan(SEXP spec, const R_xlen_t *u, R_xlen_t nu)
     const int *nch = INTEGER(VECTOR_ELT(spec, S_NCHUNK));
     int k = LENGTH(VECTOR_ELT(spec, S_DIM));
     R_xlen_t nc = XLENGTH(cache), bsize = batch_chunks();
-    double chunk_bytes = sizeof(double);
+    double chunk_bytes = elt_bytes(spec_type(spec));
     for (int d = 0; d < k; d++) chunk_bytes *= cs[d];
     R_xlen_t layer = 1;
     for (int d = 0; d < k - 1; d++) layer *= nch[d];
@@ -632,7 +708,8 @@ static void prefetch_scan(SEXP spec, const R_xlen_t *u, R_xlen_t nu)
     }
 }
 
-static R_xlen_t altarr_Get_region(SEXP x, R_xlen_t i, R_xlen_t n, double *buf)
+/* The run [i, i + n) into dbuf (double arrays) or ibuf (int storage). */
+static R_xlen_t region_read(SEXP x, R_xlen_t i, R_xlen_t n, double *dbuf, int *ibuf)
 {
     SEXP spec = SPEC(x);
     R_xlen_t len = spec_length(spec);
@@ -640,7 +717,8 @@ static R_xlen_t altarr_Get_region(SEXP x, R_xlen_t i, R_xlen_t n, double *buf)
     if (n > len - i) n = len - i;
     SEXP d2 = R_altrep_data2(x);
     if (d2 != R_NilValue) {
-        memcpy(buf, REAL_RO(d2) + i, (size_t) n * sizeof(double));
+        if (dbuf) memcpy(dbuf, REAL_RO(d2) + i, (size_t) n * sizeof(double));
+        else memcpy(ibuf, iptr_ro(d2) + i, (size_t) n * sizeof(int));
         return n;
     }
     bump(spec, ST_REGION, 1);
@@ -711,19 +789,43 @@ static R_xlen_t altarr_Get_region(SEXP x, R_xlen_t i, R_xlen_t n, double *buf)
     if (scanning) prefetch_scan(spec, u, nu);
 
     SEXP got = PROTECT(get_chunks(spec, u, nu));
-    for (R_xlen_t e = 0; e < n; e++)
-        buf[e] = REAL_RO(VECTOR_ELT(got, slot[e]))[off[e]];
+    if (dbuf) {
+        for (R_xlen_t e = 0; e < n; e++)
+            dbuf[e] = REAL_RO(VECTOR_ELT(got, slot[e]))[off[e]];
+    } else {
+        for (R_xlen_t e = 0; e < n; e++)
+            ibuf[e] = iptr_ro(VECTOR_ELT(got, slot[e]))[off[e]];
+    }
     UNPROTECT(1);
     return n;
 }
 
-/* REAL_GET_REGION from R, for tests: goes through ALTREP dispatch (and
-   through R's wrapper class, if x is wrapped) exactly as R's own code does */
+static R_xlen_t altarr_real_Get_region(SEXP x, R_xlen_t i, R_xlen_t n, double *buf)
+{
+    return region_read(x, i, n, buf, NULL);
+}
+
+static R_xlen_t altarr_int_Get_region(SEXP x, R_xlen_t i, R_xlen_t n, int *buf)
+{
+    return region_read(x, i, n, NULL, buf);
+}
+
+/* *_GET_REGION from R, for tests: goes through ALTREP dispatch (and through
+   R's wrapper class, if x is wrapped) exactly as R's own code does */
 static SEXP C_altarr_region(SEXP x, SEXP i, SEXP n)
 {
     R_xlen_t ii = (R_xlen_t) asReal(i), nn = (R_xlen_t) asReal(n);
-    SEXP out = PROTECT(allocVector(REALSXP, nn > 0 ? nn : 0));
-    R_xlen_t got = nn > 0 ? REAL_GET_REGION(x, ii, nn, REAL(out)) : 0;
+    if (nn < 0) nn = 0;
+    int type = TYPEOF(x);
+    if (type != REALSXP && type != INTSXP && type != LGLSXP)
+        error("altarr: region reads need a double, integer or logical vector");
+    SEXP out = PROTECT(allocVector(type, nn));
+    R_xlen_t got = 0;
+    if (nn > 0) {
+        if (type == REALSXP) got = REAL_GET_REGION(x, ii, nn, REAL(out));
+        else if (type == INTSXP) got = INTEGER_GET_REGION(x, ii, nn, INTEGER(out));
+        else got = LOGICAL_GET_REGION(x, ii, nn, LOGICAL(out));
+    }
     SEXP res = PROTECT(xlengthgets(out, got));
     UNPROTECT(2);
     return res;
@@ -731,12 +833,14 @@ static SEXP C_altarr_region(SEXP x, SEXP i, SEXP n)
 
 /* ---- construction ------------------------------------------------------ */
 
-static SEXP make_spec(SEXP dim, SEXP chunk, SEXP fetch)
+static SEXP make_spec(SEXP dim, SEXP chunk, SEXP fetch, int type)
 {
     if (TYPEOF(dim) != INTSXP || TYPEOF(chunk) != INTSXP ||
         LENGTH(dim) != LENGTH(chunk) || LENGTH(dim) < 1)
         error("altarr: 'dim' and 'chunk' must be integer vectors of equal length");
     if (!isFunction(fetch)) error("altarr: 'fetch' must be a function");
+    if (type != REALSXP && type != INTSXP && type != LGLSXP)
+        error("altarr: type must be double, integer or logical");
     int k = LENGTH(dim);
     SEXP nch = PROTECT(allocVector(INTSXP, k));
     double total = 1, len = 1;
@@ -771,17 +875,38 @@ static SEXP make_spec(SEXP dim, SEXP chunk, SEXP fetch)
     REAL(state)[0] = 0;
     REAL(state)[1] = 0;
     REAL(state)[2] = -1;
+    SET_VECTOR_ELT(spec, S_TYPE, ScalarInteger(type));
     UNPROTECT(2);
     return spec;
 }
 
-static SEXP C_altarr_new(SEXP dim, SEXP chunk, SEXP fetch)
+static int type_from_name(SEXP name)
 {
-    SEXP spec = PROTECT(make_spec(dim, chunk, fetch));
-    SEXP x = PROTECT(R_new_altrep(altarr_class, spec, R_NilValue));
+    if (TYPEOF(name) != STRSXP || XLENGTH(name) != 1)
+        error("altarr: 'type' must be a single string");
+    const char *t = CHAR(STRING_ELT(name, 0));
+    if (strcmp(t, "double") == 0) return REALSXP;
+    if (strcmp(t, "integer") == 0) return INTSXP;
+    if (strcmp(t, "logical") == 0) return LGLSXP;
+    error("altarr: type must be \"double\", \"integer\" or \"logical\"");
+    return REALSXP; /* not reached */
+}
+
+static SEXP C_altarr_new(SEXP dim, SEXP chunk, SEXP fetch, SEXP type)
+{
+    int t = type_from_name(type);
+    SEXP spec = PROTECT(make_spec(dim, chunk, fetch, t));
+    SEXP x = PROTECT(R_new_altrep(class_for(t), spec, R_NilValue));
     setAttrib(x, R_DimSymbol, duplicate(dim));
     UNPROTECT(2);
     return x;
+}
+
+static int is_altarr_class(SEXP x)
+{
+    return R_altrep_inherits(x, altarr_real_class) ||
+           R_altrep_inherits(x, altarr_int_class) ||
+           R_altrep_inherits(x, altarr_lgl_class);
 }
 
 /* R wraps an ALTREP object in one of its own 'wrapper' ALTREP classes when
@@ -799,7 +924,7 @@ static SEXP find_altarr(SEXP x)
     int type = TYPEOF(x);
     R_xlen_t len = XLENGTH(x);
     for (int depth = 0; depth < 4; depth++) {
-        if (R_altrep_inherits(x, altarr_class)) return x;
+        if (is_altarr_class(x)) return x;
         SEXP inner = R_altrep_data1(x);
         if (inner == R_NilValue || !ALTREP(inner) || TYPEOF(inner) != type ||
             XLENGTH(inner) != len)
@@ -946,8 +1071,10 @@ static SEXP C_altarr_hyperslab(SEXP x, SEXP subs)
     PROTECT(got);
 
     /* assemble in result column-major order */
-    SEXP res = PROTECT(allocVector(REALSXP, n));
-    double *pr = REAL(res);
+    SEXP res = PROTECT(allocVector(spec_type(spec), n));
+    int is_real = TYPEOF(res) == REALSXP;
+    double *rd = is_real ? REAL(res) : NULL;
+    int *ri = is_real ? NULL : iptr(res);
     if (n > 0) {
         int *ctr = (int *) R_alloc(k, sizeof(int));
         memset(ctr, 0, k * sizeof(int));
@@ -964,7 +1091,12 @@ static SEXP C_altarr_hyperslab(SEXP x, SEXP subs)
                 off += (idx - start) * ostride;
                 ostride *= ext;
             }
-            pr[i] = na ? NA_REAL : REAL(VECTOR_ELT(got, pidx))[off];
+            if (na) {
+                if (is_real) rd[i] = NA_REAL; else ri[i] = NA_INTEGER;
+            } else {
+                SEXP ch = VECTOR_ELT(got, pidx);
+                if (is_real) rd[i] = REAL_RO(ch)[off]; else ri[i] = iptr_ro(ch)[off];
+            }
             for (int d = 0; d < k; d++) {
                 if (++ctr[d] < len[d]) break;
                 ctr[d] = 0;
@@ -980,7 +1112,7 @@ static SEXP C_altarr_hyperslab(SEXP x, SEXP subs)
 
 static const R_CallMethodDef CallEntries[] = {
     {"C_altarr_region", (DL_FUNC) &C_altarr_region, 3},
-    {"C_altarr_new", (DL_FUNC) &C_altarr_new, 3},
+    {"C_altarr_new", (DL_FUNC) &C_altarr_new, 4},
     {"C_altarr_is", (DL_FUNC) &C_altarr_is, 1},
     {"C_altarr_info", (DL_FUNC) &C_altarr_info, 1},
     {"C_altarr_reset", (DL_FUNC) &C_altarr_reset, 2},
@@ -990,22 +1122,39 @@ static const R_CallMethodDef CallEntries[] = {
     {NULL, NULL, 0}
 };
 
+static void set_common_methods(R_altrep_class_t cls)
+{
+    R_set_altrep_Length_method(cls, altarr_Length);
+    R_set_altrep_Inspect_method(cls, altarr_Inspect);
+    R_set_altrep_Duplicate_method(cls, altarr_Duplicate);
+    R_set_altrep_Serialized_state_method(cls, altarr_Serialized_state);
+    R_set_altrep_Unserialize_method(cls, altarr_Unserialize);
+    R_set_altvec_Dataptr_method(cls, altarr_Dataptr);
+    R_set_altvec_Dataptr_or_null_method(cls, altarr_Dataptr_or_null);
+    R_set_altvec_Extract_subset_method(cls, altarr_Extract_subset);
+}
+
 void R_init_altarr(DllInfo *dll)
 {
-    altarr_class = R_make_altreal_class("altarr_real", "altarr", dll);
-    R_set_altrep_Length_method(altarr_class, altarr_Length);
-    R_set_altrep_Inspect_method(altarr_class, altarr_Inspect);
-    R_set_altrep_Duplicate_method(altarr_class, altarr_Duplicate);
-    R_set_altrep_Serialized_state_method(altarr_class, altarr_Serialized_state);
-    R_set_altrep_Unserialize_method(altarr_class, altarr_Unserialize);
-    R_set_altvec_Dataptr_method(altarr_class, altarr_Dataptr);
-    R_set_altvec_Dataptr_or_null_method(altarr_class, altarr_Dataptr_or_null);
-    R_set_altvec_Extract_subset_method(altarr_class, altarr_Extract_subset);
-    R_set_altreal_Elt_method(altarr_class, altarr_Elt);
-    R_set_altreal_Get_region_method(altarr_class, altarr_Get_region);
-    R_set_altreal_Sum_method(altarr_class, altarr_Sum);
-    R_set_altreal_Min_method(altarr_class, altarr_Min);
-    R_set_altreal_Max_method(altarr_class, altarr_Max);
+    /* "altarr_real" is the original class name: recipes saved by earlier
+       versions find it on readRDS() */
+    altarr_real_class = R_make_altreal_class("altarr_real", "altarr", dll);
+    set_common_methods(altarr_real_class);
+    R_set_altreal_Elt_method(altarr_real_class, altarr_real_Elt);
+    R_set_altreal_Get_region_method(altarr_real_class, altarr_real_Get_region);
+    R_set_altreal_Sum_method(altarr_real_class, altarr_Sum);
+    R_set_altreal_Min_method(altarr_real_class, altarr_Min);
+    R_set_altreal_Max_method(altarr_real_class, altarr_Max);
+
+    altarr_int_class = R_make_altinteger_class("altarr_integer", "altarr", dll);
+    set_common_methods(altarr_int_class);
+    R_set_altinteger_Elt_method(altarr_int_class, altarr_int_Elt);
+    R_set_altinteger_Get_region_method(altarr_int_class, altarr_int_Get_region);
+
+    altarr_lgl_class = R_make_altlogical_class("altarr_logical", "altarr", dll);
+    set_common_methods(altarr_lgl_class);
+    R_set_altlogical_Elt_method(altarr_lgl_class, altarr_int_Elt);
+    R_set_altlogical_Get_region_method(altarr_lgl_class, altarr_int_Get_region);
 
     R_registerRoutines(dll, NULL, CallEntries, NULL, NULL);
     R_useDynamicSymbols(dll, FALSE);

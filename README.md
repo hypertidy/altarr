@@ -3,7 +3,8 @@
 What R does today with an ALTREP that has a `dim` and no class.
 
 `altarr` makes a lazily-read, chunked, remote array that is, as far as R is
-concerned, an ordinary double vector with a `dim` attribute. No class, no S4,
+concerned, an ordinary double, integer or logical vector with a `dim`
+attribute. No class, no S4,
 no methods. Chunks come from a fetch function you supply, so the store behind
 it can be anything: object storage, Zarr, GDAL, a generator.
 
@@ -134,14 +135,37 @@ Still element by element: `is.na()`, which has no ALTREP hook, and so
 `mean(x, na.rm = TRUE)`, which calls `x[!is.na(x)]`. The subset itself is
 planned; the `is.na()` pass is not.
 
+## Integer and logical arrays
+
+`altarr(dim, chunk, fetch, type = "integer")` (or `"logical"`) makes an
+integer or logical array. One engine serves three ALTREP classes
+(`altarr_real`, `altarr_integer`, `altarr_logical`); chunks are cached in
+the array's own type, so an integer array uses half the cache of a double
+one. Every path above works for all three types.
+
+Integer and logical arrays deliberately have no `Sum`/`Min`/`Max` methods
+of their own. R then reduces them with its own code over `Get_region`,
+which is planned, so integer overflow, `NA` handling and result types are
+exactly base R's (they are base R's). `which()` on a lazy logical array is
+planned the same way.
+
+`altarr_zarr_v2()` follows the store's dtype: floats give double, integer
+dtypes give integer, `|b1` gives logical. If CF `scale_factor` or
+`add_offset` apply, the array is double, holding unpacked values;
+`unpack = FALSE` returns the stored integers. Checked value for value
+against zarr-python stores of `int16`, `uint16`, `int8` and `bool`.
+
+Recipes saved before typed arrays existed load as double arrays.
+
 ## The fetch contract
 
 ```r
 fetch(chunks)
 # chunks: integer matrix, one row per chunk, one column per dimension,
 #         0-based chunk coordinates
-# returns: list of numeric vectors, one per row, column-major, clipped at
-#          the array edge (edge chunks are not padded)
+# returns: list of vectors, one per row, column-major, clipped at the
+#          array edge (edge chunks are not padded), of the array's type
+#          (others are coerced as as.double/as.integer/as.logical would)
 ```
 
 `altarr_zarr_v2()` is an 85-line implementation of this for Zarr v2 (zlib or

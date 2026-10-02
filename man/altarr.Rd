@@ -4,7 +4,13 @@
 \alias{altarr}
 \title{Create a lazily-read chunked array}
 \usage{
-altarr(dim, chunk, fetch, dimnames = NULL)
+altarr(
+  dim,
+  chunk,
+  fetch,
+  dimnames = NULL,
+  type = c("double", "integer", "logical")
+)
 }
 \arguments{
 \item{dim}{integer dimensions.}
@@ -13,16 +19,20 @@ altarr(dim, chunk, fetch, dimnames = NULL)
 
 \item{fetch}{a function taking an integer matrix of 0-based chunk
 coordinates (one row per chunk, one column per dimension) and returning
-a list of numeric vectors, one per row, in column-major order and
-clipped at the array edge.}
+a list of vectors, one per row, in column-major order and clipped at the
+array edge. Chunks should be of the array's `type`; other numeric or
+logical vectors are coerced as `as.double()`, `as.integer()` or
+`as.logical()` would.}
 
 \item{dimnames}{optional dimnames.}
+
+\item{type}{the array's type: `"double"`, `"integer"` or `"logical"`.}
 }
 \value{
 a lazy array.
 }
 \description{
-Returns an ordinary double vector with a `dim` attribute and no class.
-It is an ALTREP object: values are obtained chunk by chunk from `fetch`
-only when base R asks for them.
+Returns an ordinary double, integer or logical vector with a `dim`
+attribute and no class. It is an ALTREP object: values are obtained chunk
+by chunk from `fetch` only when base R asks for them.
 }

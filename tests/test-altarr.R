@@ -161,7 +161,7 @@ zx <- altarr_zarr_v2(zdir)
 check(dim(zx), rd, "packed dims reversed")
 check(altarr_extract(zx, , , ), want, "CF unpacking")
 check(zx[cbind(c(2, 7), c(3, 5), c(4, 9))], want[cbind(c(2, 7), c(3, 5), c(4, 9))], "packed points")
-check(altarr_zarr_v2(zdir, unpack = FALSE)[2, 3, 4], -32767, "unpack = FALSE")
+check(altarr_zarr_v2(zdir, unpack = FALSE)[2, 3, 4], -32767L, "unpack = FALSE: raw integers")
 
 ## ---- a virtual array larger than R's maximum vector length is refused ---
 r <- try(altarr(c(2e9, 2e9, 2e3), c(1e5, 1e5, 1e3), function(chunks) list()),
@@ -315,5 +315,86 @@ altarr_reset(rx)
 stopifnot(isTRUE(all.equal(sum(rw, na.rm = TRUE), sum(rc$ref, na.rm = TRUE))),
           altarr_stats(rx)[["elt"]] == 0, altarr_stats(rx)[["fetch_calls"]] == 4)
 options(old)
+
+## ---- integer and logical arrays: every path, R's own reductions ----------
+tregion <- function(x, i, n) .Call(altarr:::C_altarr_region, x, i, n)
+tmk <- function(ref, cs, type) {
+  d <- dim(ref)
+  gen <- function(ch) lapply(seq_len(nrow(ch)), function(r) {
+    st <- ch[r, ] * cs + 1L; en <- pmin(st + cs - 1L, d)
+    idx <- lapply(seq_along(d), function(k) st[k]:en[k])
+    as.vector(do.call(`[`, c(list(ref), idx, list(drop = FALSE))))
+  })
+  altarr(d, cs, gen, type = type)
+}
+td <- c(37L, 29L, 11L); tcs <- c(8L, 7L, 3L)
+set.seed(7)
+trefs <- list(integer = array(sample(-1000:1000, prod(td), TRUE), td),
+              logical = array(sample(c(TRUE, FALSE), prod(td), TRUE), td))
+for (ty in names(trefs)) { r <- trefs[[ty]]; r[sample(length(r), 25)] <- NA; trefs[[ty]] <- r }
+old <- options(altarr.max_materialize = 1e9)
+for (ty in names(trefs)) {
+  tref <- trefs[[ty]]
+  for (b in c(0, 2000, 1e9)) {
+    options(altarr.cache_bytes = b)
+    tx <- tmk(tref, tcs, ty)
+    stopifnot(identical(typeof(tx), typeof(tref)))
+    for (rep in 1:8) {
+      i <- sort(sample(td[1], 10)); j <- sample(td[2], 4); k <- sample(td[3], 3)
+      check(tx[i, j, k], tref[i, j, k], paste(ty, "Elt path"))
+      check(altarr_extract(tx, i, j, k), tref[i, j, k], paste(ty, "hyperslab"))
+      m <- cbind(sample(td[1], 30, TRUE), sample(td[2], 30, TRUE), sample(td[3], 30, TRUE))
+      check(tx[m], tref[m], paste(ty, "Extract_subset"))
+      lin <- c(sample(length(tref), 40), NA)
+      check(tx[lin], tref[lin], paste(ty, "linear with NA"))
+      s0 <- sample(0:(length(tref) - 1), 1); n0 <- sample(c(1, 9, 512), 1)
+      check(tregion(tx, s0, n0), as.vector(tref)[(s0 + 1):min(length(tref), s0 + n0)],
+            paste(ty, "region"))
+    }
+    for (f in c("sum", "min", "max", "mean", "prod")) for (nr in c(FALSE, TRUE)) {
+      check(suppressWarnings(do.call(f, list(tx, na.rm = nr))),
+            suppressWarnings(do.call(f, list(tref, na.rm = nr))), paste(ty, f))
+    }
+    check(anyNA(tx), anyNA(tref), paste(ty, "anyNA"))
+    if (ty == "logical") check(which(tx), which(tref), "which() on a lazy logical array")
+    ty2 <- tx; ty2[1, 1, 1] <- tref[2, 1, 1]               # materialize a copy
+    check(ty2[-1], tref[-1], paste(ty, "materialized copy"))
+    stopifnot(typeof(ty2) == typeof(tref), altarr_stats(tx)[["cache_bytes"]] <= b)
+  }
+  f3 <- tempfile(fileext = ".rds"); saveRDS(tmk(tref, tcs, ty), f3); tb <- readRDS(f3)
+  stopifnot(is_altarr(tb), typeof(tb) == typeof(tref))
+  check(tb[1:20], tref[1:20], paste(ty, "serialization keeps the type"))
+}
+options(old)
+## integer overflow behaves exactly as base R does on this R version
+big <- array(.Machine$integer.max - 5L, c(4L, 4L))
+bxi <- tmk(big, c(2L, 2L), "integer")
+quiet <- function(e) withCallingHandlers(e, warning = function(w) invokeRestart("muffleWarning"))
+check(quiet(sum(bxi)), quiet(sum(big)), "integer overflow as base R")
+## chunks of another type are coerced like as.integer() / as.logical()
+cxi <- altarr(4L, 4L, function(ch) list(c(1.9, -2.5, 3, NA)), type = "integer")
+check(as.vector(cxi[1:4]), as.integer(c(1.9, -2.5, 3, NA)), "coercion to integer")
+cxl <- altarr(3L, 3L, function(ch) list(c(0, 2, NA)), type = "logical")
+check(as.vector(cxl[1:3]), c(FALSE, TRUE, NA), "coercion to logical")
+stopifnot(inherits(try(altarr(2L, 2L, function(ch) list(1:2), type = "complex"), silent = TRUE),
+                   "try-error"))
+## Zarr: integer dtypes give integer arrays, |b1 gives logical
+zbd <- file.path(tempdir(), "bool.zarr"); dir.create(zbd, showWarnings = FALSE)
+writeLines('{"shape": [3, 5], "chunks": [2, 4], "dtype": "|b1", "order": "C",
+ "compressor": null, "fill_value": false, "filters": null, "zarr_format": 2}',
+ file.path(zbd, ".zarray"))
+bref <- matrix(c(TRUE, FALSE, TRUE, TRUE, FALSE,  FALSE, FALSE, TRUE, NA, NA,
+                 TRUE, TRUE, TRUE, FALSE, TRUE), 5, 3)        # R dims c(5, 3)
+bref[4:5, 2] <- FALSE                                        # chunk 0.1 omitted: fill
+for (a in 0:1) for (b in 0:1) {
+  if (a == 0 && b == 1) next                                 # leave one chunk missing
+  full <- matrix(FALSE, 4, 2)
+  rows <- (b * 4 + 1):min(5, b * 4 + 4); cols <- (a * 2 + 1):min(3, a * 2 + 2)
+  full[seq_along(rows), seq_along(cols)] <- bref[rows, cols]
+  writeBin(as.raw(as.integer(full)), file.path(zbd, paste(a, b, sep = ".")))
+}
+zb <- altarr_zarr_v2(zbd)
+stopifnot(typeof(zb) == "logical")
+check(altarr_extract(zb, , ), bref, "bool Zarr store")
 
 cat("all tests passed\n")

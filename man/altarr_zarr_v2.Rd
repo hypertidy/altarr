@@ -18,15 +18,18 @@ a lazy array, see [altarr()]
 \description{
 A deliberately small reader, to show that a real chunked, compressed
 store fits behind the fetch contract in a few lines. Handles Zarr v2
-arrays with dtype `<f8`, `<f4`, `<i4`, `<i2` or `|u1`, compressor `null`
-or `zlib`, order `C` or `F`, and missing chunk files (read as
-`fill_value`). Zarr's padded edge chunks are clipped.
+arrays with dtype `<f8`, `<f4`, `<i4`, `<i2`, `|i1`, `<u2`, `|u1` or
+`|b1`, compressor `null` or `zlib`, order `C` or `F`, and missing chunk
+files (read as `fill_value`). Zarr's padded edge chunks are clipped.
 }
 \details{
-With `unpack = TRUE`, CF packing attributes found in `.zattrs` are
-applied inside the fetch: values equal to `_FillValue` or
-`missing_value` become `NA`, then `scale_factor` and `add_offset` are
-applied. The Zarr `fill_value` itself is not treated as missing.
+The array's type follows the dtype: floats give a double array, integers
+an integer array, `|b1` a logical array. With `unpack = TRUE`, CF
+packing attributes found in `.zattrs` are applied inside the fetch:
+values equal to `_FillValue` or `missing_value` become `NA`, and if
+`scale_factor` or `add_offset` is present the array is double, holding
+the unpacked values. The Zarr `fill_value` itself is not treated as
+missing.
 
 A C-order Zarr array of shape `(s1, ..., sn)` is returned with R `dim`
 `c(sn, ..., s1)`: C-order bytes are already column-major for the
