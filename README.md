@@ -132,6 +132,9 @@ touching the ALTREP layer.
 - `R/altarr.R`: constructor, `altarr_extract()`, `altarr_plan()`, counters.
 - `R/zarr.R`: `altarr_zarr_v2()`.
 - `tests/test-altarr.R`: every path checked against base R with `identical()`.
+- `inst/examples/walkthrough.R`: a step-by-step tour to run line by line,
+  printing what base R asked for at each step; uses `altarr_example_zarr()`,
+  which writes a small store whose values are their own positions.
 - `inst/examples/three-paths.R`: the measurements above.
 - `inst/blog/2026-10-01_altrep-dim-no-class/`: the blog post (Quarto `index.qmd`
   plus its figure), identical to the copy published on hypertidy.org.

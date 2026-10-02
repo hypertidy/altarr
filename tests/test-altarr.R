@@ -171,4 +171,14 @@ stopifnot(inherits(r, "try-error"), grepl("maximum vector length", r))
 big_ok <- altarr(c(1e9, 1e6, 4), c(1e5, 1e5, 4), function(chunks) list())  # 4e15 values
 stopifnot(length(dim(big_ok)) == 3L, altarr_stats(big_ok)[["fetch_calls"]] == 0)
 
+## ---- the example store: values are their own positions --------------------
+ep <- altarr_example_zarr()
+ex <- altarr_zarr_v2(ep)
+check(dim(ex), c(70L, 50L, 30L), "example dims")
+check(altarr_extract(ex, , , ), array(as.double(seq_len(105000) - 1), c(70L, 50L, 30L)),
+      "example values")
+ep2 <- altarr_example_zarr(dim = c(5L, 3L), chunk = c(2L, 2L))   # ragged 2-d
+check(altarr_extract(altarr_zarr_v2(ep2), , ), array(as.double(0:14), c(5L, 3L)),
+      "example 2-d ragged")
+
 cat("all tests passed\n")
