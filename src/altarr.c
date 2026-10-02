@@ -29,6 +29,7 @@
  */
 
 #include <string.h>
+#include <stdlib.h>
 #include <limits.h>
 #include <float.h>
 #include <R.h>
@@ -39,13 +40,16 @@
 static R_altrep_class_t altarr_class;
 
 /* data1: shared spec (shared by duplicates, so the cache is shared too) */
-enum { S_DIM, S_CHUNK, S_FETCH, S_NCHUNK, S_CACHE, S_STATS, S_LEN };
+enum { S_DIM, S_CHUNK, S_FETCH, S_NCHUNK, S_CACHE, S_STATS, S_TICK, S_STATE,
+       S_LEN };
+/* S_TICK: per chunk, the clock value when it was last used (for LRU)
+   S_STATE: c(clock, bytes currently cached) */
 /* counters */
 enum { ST_ELT, ST_FETCH_CALLS, ST_CHUNKS_FETCHED, ST_EXTRACT,
-       ST_HYPERSLAB, ST_MATERIALIZE, ST_REDUCE, ST_LEN };
+       ST_HYPERSLAB, ST_MATERIALIZE, ST_REDUCE, ST_EVICT, ST_LEN };
 static const char *stat_names[ST_LEN] = {
     "elt", "fetch_calls", "chunks_fetched", "extract_subset",
-    "hyperslab", "materialize", "reduce"
+    "hyperslab", "materialize", "reduce", "evictions"
 };
 /* data2: the materialized vector, or R_NilValue */
 
@@ -146,24 +150,123 @@ static SEXP fetch_raw(SEXP spec, const R_xlen_t *need, R_xlen_t m)
     return out;
 }
 
-/* Fetch the not-yet-cached chunks among 'cids' (assumed unique) in ONE call
-   to the R fetch function, and cache them. */
-static void fetch_chunks(SEXP spec, const R_xlen_t *cids, R_xlen_t n)
+/* ---- the chunk cache: LRU with a byte budget --------------------------- */
+
+/* Each request (Elt, Extract_subset, the hyperslab) asks get_chunks() for
+   the chunks it needs and assembles from the list it gets back. The cache is
+   only a place to keep chunks for later requests: it holds at most
+   getOption("altarr.cache_bytes") bytes (default 256 MiB), evicting the
+   least recently used chunks first. Because a request holds its own
+   references, eviction can never take a chunk away from a request that is
+   still using it. The budget is per array (per shared recipe: a copy and its
+   original share one cache). */
+
+#define CLOCK(spec) (REAL(VECTOR_ELT(spec, S_STATE))[0])
+#define BYTES(spec) (REAL(VECTOR_ELT(spec, S_STATE))[1])
+
+static double cache_budget(void)
 {
-    SEXP cache = VECTOR_ELT(spec, S_CACHE);
-    R_xlen_t *need = (R_xlen_t *) R_alloc(n > 0 ? n : 1, sizeof(R_xlen_t));
-    R_xlen_t m = 0;
-    for (R_xlen_t i = 0; i < n; i++)
-        if (VECTOR_ELT(cache, cids[i]) == R_NilValue) need[m++] = cids[i];
-    if (m == 0) return;
-    SEXP got = PROTECT(fetch_raw(spec, need, m));
-    for (R_xlen_t j = 0; j < m; j++)
-        SET_VECTOR_ELT(cache, need[j], VECTOR_ELT(got, j));
-    UNPROTECT(1);
+    double b = asReal(GetOption1(install("altarr.cache_bytes")));
+    if (ISNAN(b) || b < 0) b = 268435456.0;   /* 256 MiB */
+    return b;
 }
 
-/* value of element li (0-based); fetches its chunk alone if not cached */
-static double value_at(SEXP spec, R_xlen_t li)
+static void cache_put(SEXP spec, R_xlen_t cid, SEXP v)
+{
+    SEXP cache = VECTOR_ELT(spec, S_CACHE);
+    if (VECTOR_ELT(cache, cid) != R_NilValue) return;
+    SET_VECTOR_ELT(cache, cid, v);
+    REAL(VECTOR_ELT(spec, S_TICK))[cid] = CLOCK(spec);
+    BYTES(spec) += (double) XLENGTH(v) * sizeof(double);
+}
+
+static void cache_drop(SEXP spec, R_xlen_t cid)
+{
+    SEXP cache = VECTOR_ELT(spec, S_CACHE);
+    SEXP v = VECTOR_ELT(cache, cid);
+    if (v == R_NilValue) return;
+    BYTES(spec) -= (double) XLENGTH(v) * sizeof(double);
+    SET_VECTOR_ELT(cache, cid, R_NilValue);
+}
+
+typedef struct { double tick; R_xlen_t cid; } lru_entry;
+
+static int lru_cmp(const void *a, const void *b)
+{
+    double ta = ((const lru_entry *) a)->tick, tb = ((const lru_entry *) b)->tick;
+    return (ta > tb) - (ta < tb);
+}
+
+/* evict least recently used chunks until the cache fits its budget */
+static void cache_trim(SEXP spec)
+{
+    double budget = cache_budget();
+    if (BYTES(spec) <= budget) return;
+    SEXP cache = VECTOR_ELT(spec, S_CACHE);
+    const double *tick = REAL(VECTOR_ELT(spec, S_TICK));
+    R_xlen_t nc = XLENGTH(cache), ncached = 0;
+    for (R_xlen_t c = 0; c < nc; c++)
+        if (VECTOR_ELT(cache, c) != R_NilValue) ncached++;
+    lru_entry *e = (lru_entry *) R_alloc(ncached > 0 ? ncached : 1, sizeof(lru_entry));
+    R_xlen_t j = 0;
+    for (R_xlen_t c = 0; c < nc; c++)
+        if (VECTOR_ELT(cache, c) != R_NilValue) { e[j].tick = tick[c]; e[j].cid = c; j++; }
+    qsort(e, (size_t) ncached, sizeof(lru_entry), lru_cmp);
+    for (j = 0; j < ncached && BYTES(spec) > budget; j++) {
+        cache_drop(spec, e[j].cid);
+        bump(spec, ST_EVICT, 1);
+    }
+    if (BYTES(spec) < 0.5) BYTES(spec) = 0;   /* keep float drift tidy */
+}
+
+static void cache_clear(SEXP spec)
+{
+    SEXP cache = VECTOR_ELT(spec, S_CACHE);
+    for (R_xlen_t c = 0; c < XLENGTH(cache); c++)
+        SET_VECTOR_ELT(cache, c, R_NilValue);
+    SEXP tick = VECTOR_ELT(spec, S_TICK);
+    memset(REAL(tick), 0, XLENGTH(tick) * sizeof(double));
+    BYTES(spec) = 0;
+}
+
+/* The chunks cids[0..n) (unique), as a list aligned with cids. Cached ones
+   are marked as just used; missing ones are fetched in ONE call and offered
+   to the cache, which is then trimmed to its budget. Caller protects. */
+static SEXP get_chunks(SEXP spec, const R_xlen_t *cids, R_xlen_t n)
+{
+    SEXP cache = VECTOR_ELT(spec, S_CACHE);
+    double *tick = REAL(VECTOR_ELT(spec, S_TICK));
+    double now = (CLOCK(spec) += 1);
+    SEXP out = PROTECT(allocVector(VECSXP, n));
+    R_xlen_t *need = (R_xlen_t *) R_alloc(n > 0 ? n : 1, sizeof(R_xlen_t));
+    R_xlen_t *where = (R_xlen_t *) R_alloc(n > 0 ? n : 1, sizeof(R_xlen_t));
+    R_xlen_t m = 0;
+    for (R_xlen_t i = 0; i < n; i++) {
+        SEXP c = VECTOR_ELT(cache, cids[i]);
+        if (c != R_NilValue) {
+            SET_VECTOR_ELT(out, i, c);
+            tick[cids[i]] = now;
+        } else {
+            need[m] = cids[i];
+            where[m] = i;
+            m++;
+        }
+    }
+    if (m > 0) {
+        SEXP got = PROTECT(fetch_raw(spec, need, m));
+        for (R_xlen_t j = 0; j < m; j++) {
+            SET_VECTOR_ELT(out, where[j], VECTOR_ELT(got, j));
+            cache_put(spec, need[j], VECTOR_ELT(got, j));
+        }
+        UNPROTECT(1);
+        cache_trim(spec);
+    }
+    UNPROTECT(1);
+    return out;
+}
+
+/* chunk id and offset within that chunk of element li (0-based) */
+static void locate(SEXP spec, R_xlen_t li, R_xlen_t *cid_out, R_xlen_t *off_out)
 {
     const int *dim = INTEGER(VECTOR_ELT(spec, S_DIM));
     const int *cs = INTEGER(VECTOR_ELT(spec, S_CHUNK));
@@ -182,14 +285,63 @@ static double value_at(SEXP spec, R_xlen_t li)
         off += (idx - start) * ostride;
         ostride *= ext;
     }
-    SEXP cache = VECTOR_ELT(spec, S_CACHE);
-    SEXP ch = VECTOR_ELT(cache, cid);
-    if (ch == R_NilValue) {
-        fetch_chunks(spec, &cid, 1);
-        ch = VECTOR_ELT(cache, cid);
-    }
-    return REAL(ch)[off];
+    *cid_out = cid;
+    *off_out = off;
 }
+
+/* value of element li (0-based); fetches its chunk alone if not cached */
+static double value_at(SEXP spec, R_xlen_t li)
+{
+    R_xlen_t cid, off;
+    locate(spec, li, &cid, &off);
+    SEXP ch = VECTOR_ELT(VECTOR_ELT(spec, S_CACHE), cid);
+    if (ch != R_NilValue) {
+        /* advance the clock so a hit always counts as more recent than
+           anything fetched before it */
+        REAL(VECTOR_ELT(spec, S_TICK))[cid] = (CLOCK(spec) += 1);
+        return REAL(ch)[off];
+    }
+    SEXP got = PROTECT(get_chunks(spec, &cid, 1));
+    double v = REAL(VECTOR_ELT(got, 0))[off];
+    UNPROTECT(1);
+    return v;
+}
+
+/* write chunk cid's values (clipped, column-major) into a full array */
+static void scatter_chunk(SEXP spec, R_xlen_t cid, const double *v, double *dest)
+{
+    const int *dim = INTEGER(VECTOR_ELT(spec, S_DIM));
+    const int *cs = INTEGER(VECTOR_ELT(spec, S_CHUNK));
+    const int *nch = INTEGER(VECTOR_ELT(spec, S_NCHUNK));
+    int k = LENGTH(VECTOR_ELT(spec, S_DIM));
+    R_xlen_t *start = (R_xlen_t *) R_alloc(k, sizeof(R_xlen_t));
+    R_xlen_t *ext = (R_xlen_t *) R_alloc(k, sizeof(R_xlen_t));
+    R_xlen_t *gstride = (R_xlen_t *) R_alloc(k, sizeof(R_xlen_t));
+    R_xlen_t *ctr = (R_xlen_t *) R_alloc(k, sizeof(R_xlen_t));
+    R_xlen_t rem = cid, n = 1, gs = 1;
+    for (int d = 0; d < k; d++) {
+        R_xlen_t cc = rem % nch[d];
+        rem /= nch[d];
+        start[d] = cc * cs[d];
+        ext[d] = dim[d] - start[d];
+        if (ext[d] > cs[d]) ext[d] = cs[d];
+        gstride[d] = gs;
+        gs *= dim[d];
+        n *= ext[d];
+        ctr[d] = 0;
+    }
+    for (R_xlen_t i = 0; i < n; i++) {
+        R_xlen_t g = 0;
+        for (int d = 0; d < k; d++) g += (start[d] + ctr[d]) * gstride[d];
+        dest[g] = v[i];
+        for (int d = 0; d < k; d++) {
+            if (++ctr[d] < ext[d]) break;
+            ctr[d] = 0;
+        }
+    }
+}
+
+static R_xlen_t batch_chunks(void);
 
 /* ---- ALTREP methods ---------------------------------------------------- */
 
@@ -220,13 +372,26 @@ static void *altarr_Dataptr(SEXP x, Rboolean writable)
                   "(option altarr.max_materialize = %.0f); "
                   "subset first, or raise the option", (double) n, maxn);
         bump(spec, ST_MATERIALIZE, 1);
-        R_xlen_t nc = XLENGTH(VECTOR_ELT(spec, S_CACHE));
-        R_xlen_t *cids = (R_xlen_t *) R_alloc(nc, sizeof(R_xlen_t));
-        for (R_xlen_t i = 0; i < nc; i++) cids[i] = i;
-        fetch_chunks(spec, cids, nc);
+        /* batch by batch straight into the result: cached chunks are used,
+           the rest fetched without caching (the result holds them all) */
+        SEXP cache = VECTOR_ELT(spec, S_CACHE);
+        R_xlen_t nc = XLENGTH(cache), bsize = batch_chunks();
+        R_xlen_t *need = (R_xlen_t *) R_alloc(bsize, sizeof(R_xlen_t));
         d2 = PROTECT(allocVector(REALSXP, n));
         double *p = REAL(d2);
-        for (R_xlen_t i = 0; i < n; i++) p[i] = value_at(spec, i);
+        for (R_xlen_t b0 = 0; b0 < nc; b0 += bsize) {
+            R_xlen_t b1 = b0 + bsize < nc ? b0 + bsize : nc, m = 0;
+            for (R_xlen_t c = b0; c < b1; c++)
+                if (VECTOR_ELT(cache, c) == R_NilValue) need[m++] = c;
+            SEXP fresh = PROTECT(m > 0 ? fetch_raw(spec, need, m) : R_NilValue);
+            R_xlen_t j = 0;
+            for (R_xlen_t c = b0; c < b1; c++) {
+                SEXP ch = VECTOR_ELT(cache, c);
+                if (ch == R_NilValue) ch = VECTOR_ELT(fresh, j++);
+                scatter_chunk(spec, c, REAL_RO(ch), p);
+            }
+            UNPROTECT(1);
+        }
         R_set_altrep_data2(x, d2);
         UNPROTECT(1);
     }
@@ -252,8 +417,8 @@ static SEXP altarr_Extract_subset(SEXP x, SEXP indx, SEXP call)
     /* pass 1: linear 0-based positions (-1 for NA) and unique chunks */
     R_xlen_t *li = (R_xlen_t *) R_alloc(n > 0 ? n : 1, sizeof(R_xlen_t));
     R_xlen_t nc = XLENGTH(VECTOR_ELT(spec, S_CACHE));
-    char *seen = R_alloc(nc, 1);
-    memset(seen, 0, nc);
+    R_xlen_t *pos = (R_xlen_t *) R_alloc(nc, sizeof(R_xlen_t));
+    for (R_xlen_t c = 0; c < nc; c++) pos[c] = -1;
     R_xlen_t *cids = (R_xlen_t *) R_alloc(n > 0 ? n : 1, sizeof(R_xlen_t));
     R_xlen_t m = 0;
     for (R_xlen_t i = 0; i < n; i++) {
@@ -269,18 +434,22 @@ static SEXP altarr_Extract_subset(SEXP x, SEXP indx, SEXP call)
         li[i] = ii;
         if (ii >= 0) {
             R_xlen_t cid = chunk_of(spec, ii);
-            if (!seen[cid]) { seen[cid] = 1; cids[m++] = cid; }
+            if (pos[cid] < 0) { pos[cid] = m; cids[m++] = cid; }
         }
     }
     /* one planned fetch for everything not cached */
-    fetch_chunks(spec, cids, m);
+    SEXP got = PROTECT(get_chunks(spec, cids, m));
 
-    /* pass 2: assemble */
+    /* pass 2: assemble from this request's own chunks */
     SEXP res = PROTECT(allocVector(REALSXP, n));
     double *pr = REAL(res);
-    for (R_xlen_t i = 0; i < n; i++)
-        pr[i] = li[i] >= 0 ? value_at(spec, li[i]) : NA_REAL;
-    UNPROTECT(1);
+    for (R_xlen_t i = 0; i < n; i++) {
+        if (li[i] < 0) { pr[i] = NA_REAL; continue; }
+        R_xlen_t cid, off;
+        locate(spec, li[i], &cid, &off);
+        pr[i] = REAL(VECTOR_ELT(got, pos[cid]))[off];
+    }
+    UNPROTECT(2);
     return res;
 }
 
@@ -449,6 +618,13 @@ static SEXP make_spec(SEXP dim, SEXP chunk, SEXP fetch)
     SEXP stats = allocVector(REALSXP, ST_LEN);
     SET_VECTOR_ELT(spec, S_STATS, stats);
     memset(REAL(stats), 0, ST_LEN * sizeof(double));
+    SEXP tick = allocVector(REALSXP, (R_xlen_t) total);
+    SET_VECTOR_ELT(spec, S_TICK, tick);
+    memset(REAL(tick), 0, (size_t) total * sizeof(double));
+    SEXP state = allocVector(REALSXP, 2);
+    SET_VECTOR_ELT(spec, S_STATE, state);
+    REAL(state)[0] = 0;
+    REAL(state)[1] = 0;
     UNPROTECT(2);
     return spec;
 }
@@ -513,8 +689,8 @@ static SEXP C_altarr_info(SEXP x)
     SEXP spec = SPEC(x);
     SEXP st = VECTOR_ELT(spec, S_STATS);
     SEXP cache = VECTOR_ELT(spec, S_CACHE);
-    SEXP out = PROTECT(allocVector(REALSXP, ST_LEN + 3));
-    SEXP nm = PROTECT(allocVector(STRSXP, ST_LEN + 3));
+    SEXP out = PROTECT(allocVector(REALSXP, ST_LEN + 5));
+    SEXP nm = PROTECT(allocVector(STRSXP, ST_LEN + 5));
     for (int i = 0; i < ST_LEN; i++) {
         REAL(out)[i] = REAL(st)[i];
         SET_STRING_ELT(nm, i, mkChar(stat_names[i]));
@@ -528,6 +704,10 @@ static SEXP C_altarr_info(SEXP x)
     SET_STRING_ELT(nm, ST_LEN, mkChar("chunks_cached"));
     SET_STRING_ELT(nm, ST_LEN + 1, mkChar("chunks_total"));
     SET_STRING_ELT(nm, ST_LEN + 2, mkChar("materialized"));
+    REAL(out)[ST_LEN + 3] = BYTES(spec);
+    REAL(out)[ST_LEN + 4] = cache_budget();
+    SET_STRING_ELT(nm, ST_LEN + 3, mkChar("cache_bytes"));
+    SET_STRING_ELT(nm, ST_LEN + 4, mkChar("cache_budget"));
     setAttrib(out, R_NamesSymbol, nm);
     UNPROTECT(2);
     return out;
@@ -544,11 +724,7 @@ static SEXP C_altarr_reset(SEXP x, SEXP drop_cache)
     x = check_altarr(x);
     SEXP spec = SPEC(x);
     memset(REAL(VECTOR_ELT(spec, S_STATS)), 0, ST_LEN * sizeof(double));
-    if (asLogical(drop_cache) == TRUE) {
-        SEXP cache = VECTOR_ELT(spec, S_CACHE);
-        for (R_xlen_t i = 0; i < XLENGTH(cache); i++)
-            SET_VECTOR_ELT(cache, i, R_NilValue);
-    }
+    if (asLogical(drop_cache) == TRUE) cache_clear(spec);
     return R_NilValue;
 }
 
@@ -570,6 +746,7 @@ static SEXP C_altarr_hyperslab(SEXP x, SEXP subs)
     int *len = (int *) R_alloc(k, sizeof(int));
     int **uniq = (int **) R_alloc(k, sizeof(int *));
     int *nuniq = (int *) R_alloc(k, sizeof(int));
+    int **upos = (int **) R_alloc(k, sizeof(int *));   /* chunk coord -> index in uniq */
     R_xlen_t n = 1;
     for (int d = 0; d < k; d++) {
         SEXP s = VECTOR_ELT(subs, d);
@@ -581,20 +758,27 @@ static SEXP C_altarr_hyperslab(SEXP x, SEXP subs)
         char *seen = R_alloc(nch[d], 1);
         memset(seen, 0, nch[d]);
         uniq[d] = (int *) R_alloc(nch[d], sizeof(int));
+        upos[d] = (int *) R_alloc(nch[d], sizeof(int));
         nuniq[d] = 0;
         for (int j = 0; j < len[d]; j++) {
             int v = ix[d][j];
             if (v == NA_INTEGER) continue;
             if (v < 1 || v > dim[d]) error("altarr: subscript out of bounds");
             int cc = (v - 1) / cs[d];
-            if (!seen[cc]) { seen[cc] = 1; uniq[d][nuniq[d]++] = cc; }
+            if (!seen[cc]) {
+                seen[cc] = 1;
+                upos[d][cc] = nuniq[d];
+                uniq[d][nuniq[d]++] = cc;
+            }
         }
     }
     bump(spec, ST_HYPERSLAB, 1);
 
     /* plan: cartesian product of touched chunks, fetched in one call */
     R_xlen_t np = 1;
-    for (int d = 0; d < k; d++) np *= nuniq[d];
+    R_xlen_t *pstride = (R_xlen_t *) R_alloc(k, sizeof(R_xlen_t));
+    for (int d = 0; d < k; d++) { pstride[d] = np; np *= nuniq[d]; }
+    SEXP got = R_NilValue;
     if (np > 0) {
         R_xlen_t *cids = (R_xlen_t *) R_alloc(np, sizeof(R_xlen_t));
         int *ctr = (int *) R_alloc(k, sizeof(int));
@@ -611,8 +795,9 @@ static SEXP C_altarr_hyperslab(SEXP x, SEXP subs)
                 ctr[d] = 0;
             }
         }
-        fetch_chunks(spec, cids, np);
+        got = get_chunks(spec, cids, np);
     }
+    PROTECT(got);
 
     /* assemble in result column-major order */
     SEXP res = PROTECT(allocVector(REALSXP, n));
@@ -620,9 +805,8 @@ static SEXP C_altarr_hyperslab(SEXP x, SEXP subs)
     if (n > 0) {
         int *ctr = (int *) R_alloc(k, sizeof(int));
         memset(ctr, 0, k * sizeof(int));
-        SEXP cache = VECTOR_ELT(spec, S_CACHE);
         for (R_xlen_t i = 0; i < n; i++) {
-            R_xlen_t cid = 0, cstride = 1, off = 0, ostride = 1;
+            R_xlen_t pidx = 0, off = 0, ostride = 1;
             int na = 0;
             for (int d = 0; d < k; d++) {
                 int v = ix[d][ctr[d]];
@@ -630,12 +814,11 @@ static SEXP C_altarr_hyperslab(SEXP x, SEXP subs)
                 R_xlen_t idx = v - 1, cc = idx / cs[d];
                 R_xlen_t start = cc * cs[d], ext = dim[d] - start;
                 if (ext > cs[d]) ext = cs[d];
-                cid += cc * cstride;
-                cstride *= nch[d];
+                pidx += upos[d][cc] * pstride[d];
                 off += (idx - start) * ostride;
                 ostride *= ext;
             }
-            pr[i] = na ? NA_REAL : REAL(VECTOR_ELT(cache, cid))[off];
+            pr[i] = na ? NA_REAL : REAL(VECTOR_ELT(got, pidx))[off];
             for (int d = 0; d < k; d++) {
                 if (++ctr[d] < len[d]) break;
                 ctr[d] = 0;
@@ -645,7 +828,7 @@ static SEXP C_altarr_hyperslab(SEXP x, SEXP subs)
     SEXP rdim = PROTECT(allocVector(INTSXP, k));
     for (int d = 0; d < k; d++) INTEGER(rdim)[d] = len[d];
     setAttrib(res, R_DimSymbol, rdim);
-    UNPROTECT(2);
+    UNPROTECT(3);
     return res;
 }
 

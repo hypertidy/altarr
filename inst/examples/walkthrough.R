@@ -67,7 +67,8 @@ altarr_plan(x, 1:40, 1:20, 1:3)        # those 4 chunks, as a table
 ## ALLOWED. This array has 105,000 values, under the limit, so:
 altarr_reset(x)
 y2 <- x * 2                            # arithmetic -> materializes
-seen(x)                                # materialize 1: all 80 chunks in 1 fetch call
+seen(x)                                # materialize 1: 80 chunks in 2 fetch calls
+                                       # (batches of getOption("altarr.batch_chunks", 64))
 x[1:3]                                 # from memory now: no counters move
 seen(x)
 ## Typing `x` at the console would do the same, because print() asks for the
@@ -86,10 +87,12 @@ x3 <- altarr_zarr_v2(path)
 y <- x3                                # no copy, no read
 y[1, 1, 1] <- -1                       # changing y materializes y only
 c(y[1, 1, 1], x3[1, 1, 1])             # -1, 0
-seen(x3)                               # x3 is NOT materialized, but see below
-## A copy shares its original's chunk cache. Materializing y read all 80
-## chunks through that shared cache, so x3 stays lazy yet its cache is now
-## full. (One reason the cache needs a size budget.)
+seen(x3)                               # x3 still lazy; 1 chunk cached (from x3[1, 1, 1])
+## A copy shares its original's recipe, counters and chunk cache, so the
+## counters include y's materialization (2 fetch calls, 80 chunks). But
+## materializing fills y directly, not through the shared cache, so x3's
+## cache holds only the one chunk x3 itself read. The cache is also bounded: see
+## getOption("altarr.cache_bytes") and `evictions` in altarr_stats().
 
 ## ---- 10. Saving stores the recipe, not the data --------------------------
 f <- tempfile(fileext = ".rds")
