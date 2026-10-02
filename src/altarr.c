@@ -30,6 +30,7 @@
 
 #include <string.h>
 #include <limits.h>
+#include <float.h>
 #include <R.h>
 #include <Rinternals.h>
 #include <R_ext/Altrep.h>
@@ -41,10 +42,10 @@ static R_altrep_class_t altarr_class;
 enum { S_DIM, S_CHUNK, S_FETCH, S_NCHUNK, S_CACHE, S_STATS, S_LEN };
 /* counters */
 enum { ST_ELT, ST_FETCH_CALLS, ST_CHUNKS_FETCHED, ST_EXTRACT,
-       ST_HYPERSLAB, ST_MATERIALIZE, ST_LEN };
+       ST_HYPERSLAB, ST_MATERIALIZE, ST_REDUCE, ST_LEN };
 static const char *stat_names[ST_LEN] = {
     "elt", "fetch_calls", "chunks_fetched", "extract_subset",
-    "hyperslab", "materialize"
+    "hyperslab", "materialize", "reduce"
 };
 /* data2: the materialized vector, or R_NilValue */
 
@@ -99,18 +100,12 @@ static R_xlen_t chunk_size(SEXP spec, R_xlen_t cid)
     return n;
 }
 
-/* Fetch the not-yet-cached chunks among 'cids' (assumed unique) in ONE call
-   to the R fetch function. */
-static void fetch_chunks(SEXP spec, const R_xlen_t *cids, R_xlen_t n)
+/* Call the R fetch function ONCE for chunks 'need[0..m)' and return a list
+   of validated double vectors, one per chunk (caller protects). Nothing is
+   cached here, so a reduction can stream through bounded memory. */
+static SEXP fetch_raw(SEXP spec, const R_xlen_t *need, R_xlen_t m)
 {
-    SEXP cache = VECTOR_ELT(spec, S_CACHE);
-    R_xlen_t *need = (R_xlen_t *) R_alloc(n > 0 ? n : 1, sizeof(R_xlen_t));
-    R_xlen_t m = 0;
-    for (R_xlen_t i = 0; i < n; i++)
-        if (VECTOR_ELT(cache, cids[i]) == R_NilValue) need[m++] = cids[i];
-    if (m == 0) return;
     if (m > INT_MAX) error("altarr: too many chunks in one request");
-
     int k = LENGTH(VECTOR_ELT(spec, S_DIM));
     const int *nch = INTEGER(VECTOR_ELT(spec, S_NCHUNK));
     SEXP mat = PROTECT(allocMatrix(INTSXP, (int) m, k));
@@ -127,6 +122,7 @@ static void fetch_chunks(SEXP spec, const R_xlen_t *cids, R_xlen_t n)
     if (TYPEOF(res) != VECSXP || XLENGTH(res) != m)
         error("altarr: fetch() must return a list with one element per "
               "requested chunk (%lld requested)", (long long) m);
+    SEXP out = PROTECT(allocVector(VECSXP, m));
     for (R_xlen_t j = 0; j < m; j++) {
         SEXP v = VECTOR_ELT(res, j);
         if (TYPEOF(v) != REALSXP) {
@@ -141,12 +137,29 @@ static void fetch_chunks(SEXP spec, const R_xlen_t *cids, R_xlen_t n)
                   "(edge chunks must be clipped, not padded)",
                   (long long) need[j], (long long) XLENGTH(v),
                   (long long) want);
-        SET_VECTOR_ELT(cache, need[j], v);
+        SET_VECTOR_ELT(out, j, v);
         UNPROTECT(1);
     }
     bump(spec, ST_FETCH_CALLS, 1);
     bump(spec, ST_CHUNKS_FETCHED, (double) m);
-    UNPROTECT(3);
+    UNPROTECT(4);
+    return out;
+}
+
+/* Fetch the not-yet-cached chunks among 'cids' (assumed unique) in ONE call
+   to the R fetch function, and cache them. */
+static void fetch_chunks(SEXP spec, const R_xlen_t *cids, R_xlen_t n)
+{
+    SEXP cache = VECTOR_ELT(spec, S_CACHE);
+    R_xlen_t *need = (R_xlen_t *) R_alloc(n > 0 ? n : 1, sizeof(R_xlen_t));
+    R_xlen_t m = 0;
+    for (R_xlen_t i = 0; i < n; i++)
+        if (VECTOR_ELT(cache, cids[i]) == R_NilValue) need[m++] = cids[i];
+    if (m == 0) return;
+    SEXP got = PROTECT(fetch_raw(spec, need, m));
+    for (R_xlen_t j = 0; j < m; j++)
+        SET_VECTOR_ELT(cache, need[j], VECTOR_ELT(got, j));
+    UNPROTECT(1);
 }
 
 /* value of element li (0-based); fetches its chunk alone if not cached */
@@ -319,6 +332,89 @@ static Rboolean altarr_Inspect(SEXP x, int pre, int deep, int pvec,
     return TRUE;
 }
 
+/* ---- whole-array reductions ------------------------------------------- */
+
+/* sum(), min() and max() with a single ALTREP argument go to these methods
+   (do_summary in src/main/summary.c). They walk the chunk grid in batches
+   of getOption("altarr.batch_chunks", 64) chunks: one fetch call per batch,
+   using cached chunks where present and NOT caching the rest, so memory is
+   bounded by the batch. The arithmetic mirrors base R's rsum/rmin/rmax:
+   long double accumulation for sum; for min/max any NA trumps NaN. Chunks
+   are visited in chunk order, so a sum can differ from base R's linear-order
+   sum in the last bits. */
+
+enum { RED_SUM, RED_MIN, RED_MAX };
+
+static R_xlen_t batch_chunks(void)
+{
+    double b = asReal(GetOption1(install("altarr.batch_chunks")));
+    if (ISNAN(b) || b < 1) b = 64;
+    if (b > 1e6) b = 1e6;
+    return (R_xlen_t) b;
+}
+
+static SEXP reduce_lazy(SEXP x, int op, Rboolean narm)
+{
+    if (R_altrep_data2(x) != R_NilValue) return NULL;   /* R has the data */
+    SEXP spec = SPEC(x);
+    SEXP cache = VECTOR_ELT(spec, S_CACHE);
+    R_xlen_t nc = XLENGTH(cache), bsize = batch_chunks();
+    R_xlen_t *need = (R_xlen_t *) R_alloc(bsize, sizeof(R_xlen_t));
+    long double sum = 0;   /* R's internal LDOUBLE */
+    double best = 0;
+    Rboolean updated = FALSE;
+    bump(spec, ST_REDUCE, 1);
+
+    for (R_xlen_t b0 = 0; b0 < nc; b0 += bsize) {
+        R_xlen_t b1 = b0 + bsize < nc ? b0 + bsize : nc, m = 0;
+        for (R_xlen_t c = b0; c < b1; c++)
+            if (VECTOR_ELT(cache, c) == R_NilValue) need[m++] = c;
+        SEXP fresh = PROTECT(m > 0 ? fetch_raw(spec, need, m) : R_NilValue);
+        R_xlen_t j = 0;
+        for (R_xlen_t c = b0; c < b1; c++) {
+            SEXP ch = VECTOR_ELT(cache, c);
+            if (ch == R_NilValue) ch = VECTOR_ELT(fresh, j++);
+            const double *v = REAL_RO(ch);
+            R_xlen_t n = XLENGTH(ch);
+            if (op == RED_SUM) {
+                for (R_xlen_t i = 0; i < n; i++)
+                    if (!narm || !ISNAN(v[i])) { updated = TRUE; sum += v[i]; }
+            } else {
+                for (R_xlen_t i = 0; i < n; i++) {
+                    if (ISNAN(v[i])) {
+                        if (!narm) {
+                            if (!ISNA(best)) best = v[i];  /* NA trumps NaN */
+                            updated = TRUE;
+                        }
+                    } else if (!updated ||
+                               (op == RED_MIN ? v[i] < best : v[i] > best)) {
+                        best = v[i];   /* never true once best is NA/NaN */
+                        updated = TRUE;
+                    }
+                }
+            }
+        }
+        UNPROTECT(1);
+    }
+
+    if (op == RED_SUM) {
+        double r = sum > DBL_MAX ? R_PosInf :
+                   sum < -DBL_MAX ? R_NegInf : (double) sum;
+        return ScalarReal(r);
+    }
+    if (!updated) {   /* every value NA and na.rm = TRUE: as base R */
+        warning(op == RED_MIN ?
+                "no non-missing arguments to min; returning Inf" :
+                "no non-missing arguments to max; returning -Inf");
+        return ScalarReal(op == RED_MIN ? R_PosInf : R_NegInf);
+    }
+    return ScalarReal(best);
+}
+
+static SEXP altarr_Sum(SEXP x, Rboolean narm) { return reduce_lazy(x, RED_SUM, narm); }
+static SEXP altarr_Min(SEXP x, Rboolean narm) { return reduce_lazy(x, RED_MIN, narm); }
+static SEXP altarr_Max(SEXP x, Rboolean narm) { return reduce_lazy(x, RED_MAX, narm); }
+
 /* ---- construction ------------------------------------------------------ */
 
 static SEXP make_spec(SEXP dim, SEXP chunk, SEXP fetch)
@@ -368,12 +464,25 @@ static SEXP C_altarr_new(SEXP dim, SEXP chunk, SEXP fetch)
 
 /* R wraps an ALTREP object in one of its own 'wrapper' ALTREP classes when
    attributes are changed on a shared object (e.g. dimnames(y) <- ... after
-   y <- x). The wrapper's data1 is the wrapped object, so look through. */
+   y <- x). In R's implementation (src/main/altclasses.c) the wrapper's data1
+   is the wrapped vector, so we look through it. That layout is not part of
+   the documented ALTREP API, so each step is checked: a wrapper has the same
+   type and length as what it wraps. If a future R changes the layout, this
+   returns R_NilValue and the R-level helpers report "not an altarr array"
+   rather than misreading memory. Arrays themselves keep working either way;
+   only the introspection helpers depend on this. */
 static SEXP find_altarr(SEXP x)
 {
-    for (int depth = 0; depth < 8 && x != R_NilValue && ALTREP(x); depth++) {
+    if (x == R_NilValue || !ALTREP(x)) return R_NilValue;
+    int type = TYPEOF(x);
+    R_xlen_t len = XLENGTH(x);
+    for (int depth = 0; depth < 4; depth++) {
         if (R_altrep_inherits(x, altarr_class)) return x;
-        x = R_altrep_data1(x);
+        SEXP inner = R_altrep_data1(x);
+        if (inner == R_NilValue || !ALTREP(inner) || TYPEOF(inner) != type ||
+            XLENGTH(inner) != len)
+            return R_NilValue;
+        x = inner;
     }
     return R_NilValue;
 }
@@ -563,6 +672,9 @@ void R_init_altarr(DllInfo *dll)
     R_set_altvec_Dataptr_or_null_method(altarr_class, altarr_Dataptr_or_null);
     R_set_altvec_Extract_subset_method(altarr_class, altarr_Extract_subset);
     R_set_altreal_Elt_method(altarr_class, altarr_Elt);
+    R_set_altreal_Sum_method(altarr_class, altarr_Sum);
+    R_set_altreal_Min_method(altarr_class, altarr_Min);
+    R_set_altreal_Max_method(altarr_class, altarr_Max);
 
     R_registerRoutines(dll, NULL, CallEntries, NULL, NULL);
     R_useDynamicSymbols(dll, FALSE);

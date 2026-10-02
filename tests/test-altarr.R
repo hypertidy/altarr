@@ -171,4 +171,44 @@ stopifnot(inherits(r, "try-error"), grepl("maximum vector length", r))
 big_ok <- altarr(c(1e9, 1e6, 4), c(1e5, 1e5, 4), function(chunks) list())  # 4e15 values
 stopifnot(length(dim(big_ok)) == 3L, altarr_stats(big_ok)[["fetch_calls"]] == 0)
 
+## ---- whole-array reductions: planned batches, bounded memory -------------
+rd <- c(40L, 30L, 6L); rcs <- c(10L, 10L, 2L)        # 4 x 3 x 3 = 36 chunks
+set.seed(5)
+rref <- array(rnorm(prod(rd)), rd)
+rref[3, 4, 2] <- NA; rref[39, 1, 6] <- NaN
+rgen <- function(ch) lapply(seq_len(nrow(ch)), function(r) {
+  st <- ch[r, ] * rcs + 1L; en <- pmin(st + rcs - 1L, rd)
+  as.vector(rref[st[1]:en[1], st[2]:en[2], st[3]:en[3], drop = FALSE])
+})
+rx <- altarr(rd, rcs, rgen)
+old <- options(altarr.max_materialize = 100, altarr.batch_chunks = 10)
+for (f in c("sum", "min", "max")) for (nr in c(FALSE, TRUE)) {
+  altarr_reset(rx)
+  got <- do.call(f, list(rx, na.rm = nr)); want <- do.call(f, list(rref, na.rm = nr))
+  if (is.na(want)) {
+    stopifnot(identical(is.na(got), TRUE), identical(is.nan(got), is.nan(want)))
+  } else {
+    stopifnot(isTRUE(all.equal(got, want, tolerance = 1e-12)))
+  }
+  st <- altarr_stats(rx)
+  stopifnot(st[["elt"]] == 0, st[["reduce"]] == 1, st[["fetch_calls"]] == 4,
+            st[["chunks_fetched"]] == 36, st[["chunks_cached"]] == 0,
+            st[["materialized"]] == 0)
+}
+## cached chunks are reused, not refetched
+altarr_reset(rx); invisible(rx[1:10, 1:10, 1:2])
+invisible(max(rx, na.rm = TRUE))
+stopifnot(altarr_stats(rx)[["chunks_fetched"]] == 36)
+## all-NA with na.rm = TRUE warns and returns Inf, as base R does
+nax <- altarr(c(4L, 4L), c(2L, 2L), function(ch) lapply(seq_len(nrow(ch)), function(r) rep(NA_real_, 4)))
+w <- tryCatch(min(nax, na.rm = TRUE), warning = function(w) conditionMessage(w))
+stopifnot(grepl("no non-missing arguments to min", w))
+stopifnot(identical(suppressWarnings(max(nax, na.rm = TRUE)), -Inf))
+## R's wrapper does not forward Sum/Min/Max: still correct, via elements
+ry <- rx; dimnames(ry) <- list(NULL, NULL, letters[1:6])
+altarr_reset(rx)
+stopifnot(isTRUE(all.equal(sum(ry, na.rm = TRUE), sum(rref, na.rm = TRUE))),
+          altarr_stats(ry)[["reduce"]] == 0)
+options(old)
+
 cat("all tests passed\n")

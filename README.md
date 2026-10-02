@@ -87,6 +87,28 @@ adds no data model, and returning `NULL` keeps today's behaviour.
 - `altarr_plan(x, i, j, k)` returns the plan as a data frame, one row per
   chunk. The plan is a table; the array is what assembling it gives.
 
+## Whole-array reductions
+
+`sum()`, `min()` and `max()` with a single ALTREP argument go to the
+class's own `Sum`, `Min` and `Max` methods (`do_summary` in
+`src/main/summary.c`). altarr implements them as planned passes over the
+chunk grid: one fetch call per batch of `getOption("altarr.batch_chunks",
+64)` chunks, reusing cached chunks and caching nothing new, so memory stays
+bounded by the batch. Results match base R, including its `NA`/`NaN` rules
+and the all-`NA` warning; sums are accumulated in long double in chunk order.
+
+On 2.4 million values in 48 chunks, without these methods, `sum(x)` already
+streamed without materializing, but through 2.4 million `Elt` calls and 48
+serial fetches that filled the cache. With them it is 0 `Elt` calls and 1
+fetch call (3 with batches of 16), and nothing is cached.
+
+Two gaps remain. `mean()`, `prod()` and `which()` iterate by region with no
+class hook, so they still read element by element. And R's internal wrapper
+class (made by `dimnames(y) <- ...` after `y <- x`) forwards
+`Extract_subset` but not `Sum`/`Min`/`Max`, so reductions on a wrapped array
+fall back to the element path: still correct, just slow. That second one is
+a small, concrete item for R core.
+
 ## The fetch contract
 
 ```r
