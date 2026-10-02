@@ -266,4 +266,54 @@ altarr_reset(cx3)
 stopifnot(altarr_stats(cx3)[["cache_bytes"]] == 0, altarr_stats(cx3)[["chunks_cached"]] == 0)
 options(old)
 
+## ---- region reads: mean(), prod(), anyNA() and R's wrapper ----------------
+region <- function(x, i, n) .Call(altarr:::C_altarr_region, x, i, n)
+mkr <- function(d, cs) {
+  ref <- array(as.double(seq_len(prod(d))) / 7, d); ref[c(5, 17, 40)] <- NA
+  gen <- function(ch) lapply(seq_len(nrow(ch)), function(r) {
+    st <- ch[r, ] * cs + 1L; en <- pmin(st + cs - 1L, d)
+    idx <- lapply(seq_along(d), function(k) st[k]:en[k])
+    as.vector(do.call(`[`, c(list(ref), idx, list(drop = FALSE))))
+  })
+  list(ref = ref, x = altarr(d, cs, gen))
+}
+set.seed(4)
+old <- options(altarr.max_materialize = 100)
+for (shape in list(list(c(37L, 29L, 11L), c(8L, 7L, 3L)), list(c(23L, 17L), c(5L, 4L)),
+                   list(97L, 10L))) {
+  for (b in c(0, 2000, 1e9)) {
+    options(altarr.cache_bytes = b)
+    rc <- mkr(shape[[1]], shape[[2]]); rx <- rc$x; rv <- as.vector(rc$ref); N <- length(rv)
+    for (r in 1:20) {
+      i <- sample(0:(N - 1), 1); n <- sample(c(1, 7, 512, N), 1)
+      check(region(rx, i, n), rv[(i + 1):min(N, i + n)], "region read")
+    }
+    stopifnot(length(region(rx, N, 5)) == 0)
+    check(region(rx, N - 3, 100), rv[(N - 2):N], "region clipped at the end")
+    altarr_reset(rx)
+    ## mean(na.rm = TRUE) goes through is.na(), which reads element by element
+    ## (no ALTREP hook), so only check its value; anyNA() and mean() use regions
+    stopifnot(isTRUE(all.equal(mean(rx, na.rm = TRUE), mean(rv, na.rm = TRUE))))
+    altarr_reset(rx)
+    stopifnot(identical(anyNA(rx), TRUE), identical(mean(rx), NA_real_),
+              altarr_stats(rx)[["elt"]] == 0, altarr_stats(rx)[["cache_bytes"]] <= b)
+  }
+}
+## a full scan prefetches by layer: 4 layers of 12 chunks -> 4 fetch calls
+options(altarr.cache_bytes = 1e9)
+rc <- mkr(c(40L, 30L, 8L), c(10L, 10L, 2L))
+rx <- rc$x
+stopifnot(isTRUE(all.equal(prod(rx, na.rm = TRUE), prod(rc$ref, na.rm = TRUE))))
+st <- altarr_stats(rx)
+stopifnot(st[["elt"]] == 0, st[["fetch_calls"]] == 4, st[["chunks_fetched"]] == 48)
+## isolated requests do not prefetch
+altarr_reset(rx); invisible(region(rx, 5000, 3))
+stopifnot(altarr_stats(rx)[["chunks_fetched"]] == 1)
+## R's wrapper forwards region reads, so sum() on a wrapped array is planned too
+rw <- rx; dimnames(rw) <- list(NULL, NULL, letters[1:8])
+altarr_reset(rx)
+stopifnot(isTRUE(all.equal(sum(rw, na.rm = TRUE), sum(rc$ref, na.rm = TRUE))),
+          altarr_stats(rx)[["elt"]] == 0, altarr_stats(rx)[["fetch_calls"]] == 4)
+options(old)
+
 cat("all tests passed\n")

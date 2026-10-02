@@ -43,13 +43,13 @@ static R_altrep_class_t altarr_class;
 enum { S_DIM, S_CHUNK, S_FETCH, S_NCHUNK, S_CACHE, S_STATS, S_TICK, S_STATE,
        S_LEN };
 /* S_TICK: per chunk, the clock value when it was last used (for LRU)
-   S_STATE: c(clock, bytes currently cached) */
+   S_STATE: c(clock, bytes currently cached, end of the last region read) */
 /* counters */
 enum { ST_ELT, ST_FETCH_CALLS, ST_CHUNKS_FETCHED, ST_EXTRACT,
-       ST_HYPERSLAB, ST_MATERIALIZE, ST_REDUCE, ST_EVICT, ST_LEN };
+       ST_HYPERSLAB, ST_MATERIALIZE, ST_REDUCE, ST_EVICT, ST_REGION, ST_LEN };
 static const char *stat_names[ST_LEN] = {
     "elt", "fetch_calls", "chunks_fetched", "extract_subset",
-    "hyperslab", "materialize", "reduce", "evictions"
+    "hyperslab", "materialize", "reduce", "evictions", "region"
 };
 /* data2: the materialized vector, or R_NilValue */
 
@@ -584,6 +584,151 @@ static SEXP altarr_Sum(SEXP x, Rboolean narm) { return reduce_lazy(x, RED_SUM, n
 static SEXP altarr_Min(SEXP x, Rboolean narm) { return reduce_lazy(x, RED_MIN, narm); }
 static SEXP altarr_Max(SEXP x, Rboolean narm) { return reduce_lazy(x, RED_MAX, narm); }
 
+/* ---- region reads: mean(), prod(), anyNA(), ... ------------------------ */
+
+/* Functions that iterate by region (ITERATE_BY_REGION in R's sources: mean,
+   prod, anyNA, and sum/min/max on R's wrapper class) ask for contiguous
+   runs of elements, typically 512 at a time, from the start of the array to
+   the end. A region read takes exactly the chunks its run touches, through
+   get_chunks(), so eviction stays safe.
+
+   A scan is detected when a region starts at 0 or exactly where the last
+   one ended. Then, on a cache miss, the whole chunk "layer" the scan has
+   entered is prefetched in batches of altarr.batch_chunks: all chunks that
+   share the last dimension's chunk coordinate, which in column-major order
+   is one contiguous block of the array. That happens only if the layer fits
+   the cache budget; otherwise each region fetches just what it touches. For
+   a 1-d array the "layer" is the next batch of chunks along the array.
+   Isolated region requests (not part of a scan) never prefetch. */
+
+static void prefetch_scan(SEXP spec, const R_xlen_t *u, R_xlen_t nu)
+{
+    SEXP cache = VECTOR_ELT(spec, S_CACHE);
+    const int *cs = INTEGER(VECTOR_ELT(spec, S_CHUNK));
+    const int *nch = INTEGER(VECTOR_ELT(spec, S_NCHUNK));
+    int k = LENGTH(VECTOR_ELT(spec, S_DIM));
+    R_xlen_t nc = XLENGTH(cache), bsize = batch_chunks();
+    double chunk_bytes = sizeof(double);
+    for (int d = 0; d < k; d++) chunk_bytes *= cs[d];
+    R_xlen_t layer = 1;
+    for (int d = 0; d < k - 1; d++) layer *= nch[d];
+    R_xlen_t span = k == 1 ? bsize : layer;   /* chunks to prefetch at once */
+    if ((double) span * chunk_bytes > cache_budget()) return;
+    R_xlen_t *need = (R_xlen_t *) R_alloc(bsize, sizeof(R_xlen_t));
+    R_xlen_t done_lo = -1, done_hi = -1;     /* last window prefetched */
+    for (R_xlen_t j = 0; j < nu; j++) {
+        if (VECTOR_ELT(cache, u[j]) != R_NilValue) continue;
+        if (u[j] >= done_lo && u[j] < done_hi) continue;
+        R_xlen_t lo = k == 1 ? u[j] : (u[j] / layer) * layer;
+        R_xlen_t hi = lo + span < nc ? lo + span : nc;
+        for (R_xlen_t b0 = lo; b0 < hi; b0 += bsize) {
+            R_xlen_t b1 = b0 + bsize < hi ? b0 + bsize : hi, m = 0;
+            for (R_xlen_t c = b0; c < b1; c++)
+                if (VECTOR_ELT(cache, c) == R_NilValue) need[m++] = c;
+            if (m > 0) get_chunks(spec, need, m);   /* result unused: now cached */
+        }
+        done_lo = lo;
+        done_hi = hi;
+    }
+}
+
+static R_xlen_t altarr_Get_region(SEXP x, R_xlen_t i, R_xlen_t n, double *buf)
+{
+    SEXP spec = SPEC(x);
+    R_xlen_t len = spec_length(spec);
+    if (i < 0 || i >= len || n <= 0) return 0;
+    if (n > len - i) n = len - i;
+    SEXP d2 = R_altrep_data2(x);
+    if (d2 != R_NilValue) {
+        memcpy(buf, REAL_RO(d2) + i, (size_t) n * sizeof(double));
+        return n;
+    }
+    bump(spec, ST_REGION, 1);
+    const int *dim = INTEGER(VECTOR_ELT(spec, S_DIM));
+    const int *cs = INTEGER(VECTOR_ELT(spec, S_CHUNK));
+    const int *nch = INTEGER(VECTOR_ELT(spec, S_NCHUNK));
+    int k = LENGTH(VECTOR_ELT(spec, S_DIM));
+
+    /* Walk the run with an odometer over (chunk coordinate, position within
+       the chunk) per dimension: no divisions per element. Each element gets
+       a slot in the list of distinct chunks the run touches; neighbours
+       nearly always share a chunk, so the previous slot is checked first. */
+    R_xlen_t *cc = (R_xlen_t *) R_alloc(k, sizeof(R_xlen_t));
+    R_xlen_t *wp = (R_xlen_t *) R_alloc(k, sizeof(R_xlen_t));
+    R_xlen_t *ext = (R_xlen_t *) R_alloc(k, sizeof(R_xlen_t));
+    R_xlen_t *cstride = (R_xlen_t *) R_alloc(k, sizeof(R_xlen_t));
+    R_xlen_t rem = i, cst = 1;
+    for (int d = 0; d < k; d++) {
+        R_xlen_t idx = rem % dim[d];
+        rem /= dim[d];
+        cc[d] = idx / cs[d];
+        wp[d] = idx - cc[d] * cs[d];
+        ext[d] = dim[d] - cc[d] * cs[d];
+        if (ext[d] > cs[d]) ext[d] = cs[d];
+        cstride[d] = cst;
+        cst *= nch[d];
+    }
+    R_xlen_t *u = (R_xlen_t *) R_alloc(n, sizeof(R_xlen_t));     /* distinct chunks */
+    R_xlen_t *slot = (R_xlen_t *) R_alloc(n, sizeof(R_xlen_t));
+    R_xlen_t *off = (R_xlen_t *) R_alloc(n, sizeof(R_xlen_t));
+    R_xlen_t nu = 0, last = -1;
+    for (R_xlen_t e = 0; e < n; e++) {
+        R_xlen_t cid = 0, o = 0, ostride = 1;
+        for (int d = 0; d < k; d++) {
+            cid += cc[d] * cstride[d];
+            o += wp[d] * ostride;
+            ostride *= ext[d];
+        }
+        R_xlen_t sl = -1;
+        if (last >= 0 && u[last] == cid) sl = last;
+        else {
+            for (R_xlen_t q = 0; q < nu; q++) if (u[q] == cid) { sl = q; break; }
+            if (sl < 0) { sl = nu; u[nu++] = cid; }
+        }
+        slot[e] = sl;
+        off[e] = o;
+        last = sl;
+        /* next element: increment dimension 0, carrying upward */
+        for (int d = 0; d < k; d++) {
+            wp[d]++;
+            if (cc[d] * cs[d] + wp[d] == dim[d]) {          /* wrapped this dim */
+                cc[d] = 0; wp[d] = 0;
+                ext[d] = dim[d] < cs[d] ? dim[d] : cs[d];
+                continue;                                   /* carry */
+            }
+            if (wp[d] == ext[d]) {                          /* next chunk along d */
+                cc[d]++; wp[d] = 0;
+                ext[d] = dim[d] - cc[d] * cs[d];
+                if (ext[d] > cs[d]) ext[d] = cs[d];
+            }
+            break;
+        }
+    }
+
+    double *st = REAL(VECTOR_ELT(spec, S_STATE));
+    int scanning = (i == 0) || ((double) i == st[2]);
+    st[2] = (double) (i + n);
+    if (scanning) prefetch_scan(spec, u, nu);
+
+    SEXP got = PROTECT(get_chunks(spec, u, nu));
+    for (R_xlen_t e = 0; e < n; e++)
+        buf[e] = REAL_RO(VECTOR_ELT(got, slot[e]))[off[e]];
+    UNPROTECT(1);
+    return n;
+}
+
+/* REAL_GET_REGION from R, for tests: goes through ALTREP dispatch (and
+   through R's wrapper class, if x is wrapped) exactly as R's own code does */
+static SEXP C_altarr_region(SEXP x, SEXP i, SEXP n)
+{
+    R_xlen_t ii = (R_xlen_t) asReal(i), nn = (R_xlen_t) asReal(n);
+    SEXP out = PROTECT(allocVector(REALSXP, nn > 0 ? nn : 0));
+    R_xlen_t got = nn > 0 ? REAL_GET_REGION(x, ii, nn, REAL(out)) : 0;
+    SEXP res = PROTECT(xlengthgets(out, got));
+    UNPROTECT(2);
+    return res;
+}
+
 /* ---- construction ------------------------------------------------------ */
 
 static SEXP make_spec(SEXP dim, SEXP chunk, SEXP fetch)
@@ -621,10 +766,11 @@ static SEXP make_spec(SEXP dim, SEXP chunk, SEXP fetch)
     SEXP tick = allocVector(REALSXP, (R_xlen_t) total);
     SET_VECTOR_ELT(spec, S_TICK, tick);
     memset(REAL(tick), 0, (size_t) total * sizeof(double));
-    SEXP state = allocVector(REALSXP, 2);
+    SEXP state = allocVector(REALSXP, 3);
     SET_VECTOR_ELT(spec, S_STATE, state);
     REAL(state)[0] = 0;
     REAL(state)[1] = 0;
+    REAL(state)[2] = -1;
     UNPROTECT(2);
     return spec;
 }
@@ -833,6 +979,7 @@ static SEXP C_altarr_hyperslab(SEXP x, SEXP subs)
 }
 
 static const R_CallMethodDef CallEntries[] = {
+    {"C_altarr_region", (DL_FUNC) &C_altarr_region, 3},
     {"C_altarr_new", (DL_FUNC) &C_altarr_new, 3},
     {"C_altarr_is", (DL_FUNC) &C_altarr_is, 1},
     {"C_altarr_info", (DL_FUNC) &C_altarr_info, 1},
@@ -855,6 +1002,7 @@ void R_init_altarr(DllInfo *dll)
     R_set_altvec_Dataptr_or_null_method(altarr_class, altarr_Dataptr_or_null);
     R_set_altvec_Extract_subset_method(altarr_class, altarr_Extract_subset);
     R_set_altreal_Elt_method(altarr_class, altarr_Elt);
+    R_set_altreal_Get_region_method(altarr_class, altarr_Get_region);
     R_set_altreal_Sum_method(altarr_class, altarr_Sum);
     R_set_altreal_Min_method(altarr_class, altarr_Min);
     R_set_altreal_Max_method(altarr_class, altarr_Max);
