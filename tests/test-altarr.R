@@ -210,5 +210,14 @@ altarr_reset(rx)
 stopifnot(isTRUE(all.equal(sum(ry, na.rm = TRUE), sum(rref, na.rm = TRUE))),
           altarr_stats(ry)[["reduce"]] == 0)
 options(old)
+## ---- the example store: values are their own positions --------------------
+ep <- altarr_example_zarr()
+ex <- altarr_zarr_v2(ep)
+check(dim(ex), c(70L, 50L, 30L), "example dims")
+check(altarr_extract(ex, , , ), array(as.double(seq_len(105000) - 1), c(70L, 50L, 30L)),
+      "example values")
+ep2 <- altarr_example_zarr(dim = c(5L, 3L), chunk = c(2L, 2L))   # ragged 2-d
+check(altarr_extract(altarr_zarr_v2(ep2), , ), array(as.double(0:14), c(5L, 3L)),
+      "example 2-d ragged")
 
 cat("all tests passed\n")
