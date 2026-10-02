@@ -157,32 +157,62 @@ against zarr-python stores of `int16`, `uint16`, `int8` and `bool`.
 
 Recipes saved before typed arrays existed load as double arrays.
 
-## The fetch contract
+## The contract
+
+The full version is `?altarr_contract`. In short:
 
 ```r
 fetch(chunks)
 # chunks: integer matrix, one row per chunk, one column per dimension,
-#         0-based chunk coordinates
+#         0-based chunk coordinates, rows in any order
 # returns: list of vectors, one per row, column-major, clipped at the
 #          array edge (edge chunks are not padded), of the array's type
 #          (others are coerced as as.double/as.integer/as.logical would)
 ```
 
-`altarr_zarr_v2()` is an 85-line implementation of this for Zarr v2 (zlib or
+- **One call is one round trip.** altarr asks for as many chunks per call as
+  it can plan, so a fetch that reads concurrently gets the full benefit.
+  Fetch runs on R's main thread: retries, timeouts and concurrency belong
+  inside it, and nothing it runs off-thread may call the R API.
+- **Sources must be pinned.** R assumes a vector never changes, but altarr
+  re-fetches evicted chunks and a saved recipe re-reads its source later. Use
+  a snapshot, a fixed reference set, or content-addressed chunks.
+- **Recipes carry their fetch function's environment.** A fetch defined at
+  top level points at global variables, which `saveRDS()` does not save, so
+  reading fails in a new session. Build fetch in a small factory that
+  `force()`s a path and a few parameters (an unforced argument is a promise
+  that still points at the caller's variable).
+
+What base R does with a lazy array, measured on R 4.3 with materialization
+refused so that every attempt shows:
+
+| | operations |
+|---|---|
+| planned | `x[i]` (logical and negative too), `x[cbind(i, j, k)]`, `altarr_extract()`, `sum()`, `min()`, `max()`, `mean()`, `prod()`, `anyNA()` (stops at the first `NA`), `which()` on logical arrays, `str()` |
+| element by element | `x[i, j, k]`, `x[[i]]`, `head()` on an array, `is.na()`, and so the `is.na()` pass in `mean(na.rm = TRUE)`, `summary()`, `quantile()` |
+| materializes | printing, arithmetic and comparison, maths functions, `range()`, `c()`, `aperm()`, `apply()`, `colSums()`, assignment |
+| reads nothing | `dim()`, `length()`, `dimnames<-`, `identical()`, `saveRDS()`, `y <- x`, `as.vector()` (stays lazy) |
+
+Options: `altarr.cache_bytes` (cache budget per array, default 256 MiB),
+`altarr.batch_chunks` (chunks per fetch call in whole-array passes, default
+64), `altarr.max_materialize` (largest array a whole-array operation may
+materialize, default 1e6 values).
+
+`altarr_zarr_v2()` is an implementation of the contract for Zarr v2 (zlib or
 uncompressed, C or F order, missing chunks read as `fill_value`, padded edge
-chunks clipped, CF `scale_factor`/`add_offset`/`_FillValue` from `.zattrs` applied inside fetch). A C-order array of shape `(s1, ..., sn)` gets R `dim`
+chunks clipped, CF `scale_factor`/`add_offset`/`_FillValue` from `.zattrs`
+applied inside fetch). A C-order array of shape `(s1, ..., sn)` gets R `dim`
 `c(sn, ..., s1)`: C-order bytes are already column-major for the reversed
-shape, so nothing is ever transposed. Its output is checked value-for-value
-against an array written by zarr-python (`inst/examples/make-zarr.py`).
+shape, so nothing is ever transposed. Its output is checked value for value
+against arrays written by zarr-python.
 
 ## Limits, honestly
 
 - Lazy *reads*, not lazy compute. Anything that needs the data pointer
   materializes, and that is refused above
   `getOption("altarr.max_materialize", 1e6)` values.
-- Fetch is called on R's main thread. Concurrency belongs inside the fetch
-  implementation (Rust/object_store, GDAL), never touching the R API
-  off-thread.
+- `x[i, j, k]` reads element by element until R's `ArraySubset` offers its
+  subscripts to ALTREP; `altarr_extract()` shows what that would give.
 - Coordinates are still dimnames, which must be character. That is the one
   gap ALTREP does not touch.
 

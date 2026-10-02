@@ -14,3 +14,4 @@ Imports: stats
 Config/roxygen2/version: 8.1.0
 URL: https://github.com/hypertidy/altarr
 BugReports: https://github.com/hypertidy/altarr/issues
+Roxygen: list(markdown = TRUE)

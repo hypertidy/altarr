@@ -397,4 +397,57 @@ zb <- altarr_zarr_v2(zbd)
 stopifnot(typeof(zb) == "logical")
 check(altarr_extract(zb, , ), bref, "bool Zarr store")
 
+## ---- the documented contract (?altarr_contract) holds -----------------------
+## If a future R changes how an operation reaches the array, a test here fails
+## and the contract table needs updating.
+kd <- c(40L, 30L, 8L); kcs <- c(10L, 10L, 2L)
+set.seed(1); kref <- array(runif(prod(kd)), kd); kref[5] <- NA
+kmk <- function() altarr(kd, kcs, function(ch) lapply(seq_len(nrow(ch)), function(r) {
+  st <- ch[r, ] * kcs + 1L; en <- pmin(st + kcs - 1L, kd)
+  as.vector(kref[st[1]:en[1], st[2]:en[2], st[3]:en[3], drop = FALSE]) }))
+how <- function(e) {
+  x <- kmk()
+  r <- tryCatch({ eval(e, list(x = x)); "ok" }, error = function(err) conditionMessage(err))
+  s <- altarr_stats(x)
+  if (grepl("refusing to materialize", r)) return("materializes")
+  stopifnot(r == "ok")
+  if (s[["elt"]] > 0) return("element")
+  if (s[["fetch_calls"]] == 0) return("none")
+  "planned"
+}
+old <- options(altarr.max_materialize = 100)
+for (e in list(quote(x[1:50]), quote(x[-(1:9000)]), quote(x[cbind(1:5, 1:5, 1:5)]),
+               quote(altarr_extract(x, 1:20, 1:5, 1)), quote(sum(x, na.rm = TRUE)),
+               quote(max(x, na.rm = TRUE)), quote(mean(x)), quote(prod(x)), quote(anyNA(x)))) {
+  if (how(e) != "planned") stop("expected planned: ", deparse(e))
+}
+for (e in list(quote(x[1:20, 1:5, 1]), quote(x[[7]]), quote(is.na(x)), quote(head(x)))) {
+  if (how(e) != "element") stop("expected element by element: ", deparse(e))
+}
+for (e in list(quote(x + 1), quote(range(x, na.rm = TRUE)), quote(c(x)), quote(aperm(x)),
+               quote(capture.output(print(x))))) {
+  if (how(e) != "materializes") stop("expected to materialize: ", deparse(e))
+}
+for (e in list(quote(dim(x)), quote(identical(x, x)), quote(as.vector(x)))) {
+  if (how(e) != "none") stop("expected no reads: ", deparse(e))
+}
+stopifnot(is_altarr(as.vector(kmk())))
+options(old)
+
+## a factory-built fetch with forced arguments survives a fresh R session
+rs <- file.path(R.home("bin"), "Rscript")
+if (nzchar(Sys.getenv("_R_CHECK_PACKAGE_NAME_")) || file.exists(rs)) {
+  ff <- tempfile(fileext = ".rds")
+  make_fetch <- function(path, d, cs) {
+    force(path); force(d); force(cs)
+    function(ch) lapply(seq_len(nrow(ch)), function(r) {
+      st <- ch[r, ] * cs + 1L; rep(nchar(path), prod(pmin(cs, d - st + 1L)))
+    })
+  }
+  saveRDS(altarr(c(9L, 7L), c(4L, 4L), make_fetch("abc", c(9L, 7L), c(4L, 4L))), ff)
+  out <- system2(rs, c("-e", shQuote(sprintf("cat(readRDS('%s')[9, 7])", ff))),
+                 stdout = TRUE, stderr = TRUE)
+  stopifnot(identical(trimws(tail(out, 1)), "3"))
+}
+
 cat("all tests passed\n")
