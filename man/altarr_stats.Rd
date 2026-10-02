@@ -13,5 +13,8 @@ altarr_stats(x)
 `elt` counts per-element reads (the `x[i, j, k]` path), `extract_subset`
 counts planned subset calls (`x[i]`, `x[cbind(...)]`), `hyperslab` counts
 [altarr_extract()] calls, `fetch_calls` counts calls to the fetch function
-(round trips) and `chunks_fetched` the chunks they returned.
+(round trips) and `chunks_fetched` the chunks they returned. `reduce`
+counts whole-array `sum()`, `min()` and `max()` calls, which stream the
+chunk grid in batches of `getOption("altarr.batch_chunks", 64)` chunks
+(one fetch call per batch) without caching what they read.
 }
