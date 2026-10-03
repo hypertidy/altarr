@@ -7,31 +7,31 @@
 altarr_zarr_v2(path, unpack = TRUE)
 }
 \arguments{
-\item{path}{directory of the Zarr v2 array (containing `.zarray`)}
+\item{path}{directory of the Zarr v2 array (containing \code{.zarray})}
 
-\item{unpack}{apply CF `scale_factor`, `add_offset`, `_FillValue` and
-`missing_value` from `.zattrs`?}
+\item{unpack}{apply CF \code{scale_factor}, \code{add_offset}, \verb{_FillValue} and
+\code{missing_value} from \code{.zattrs}?}
 }
 \value{
-a lazy array, see [altarr()]
+a lazy array, see \code{\link[=altarr]{altarr()}}
 }
 \description{
 A deliberately small reader, to show that a real chunked, compressed
 store fits behind the fetch contract in a few lines. Handles Zarr v2
-arrays with dtype `<f8`, `<f4`, `<i4`, `<i2`, `|i1`, `<u2`, `|u1` or
-`|b1`, compressor `null` or `zlib`, order `C` or `F`, and missing chunk
-files (read as `fill_value`). Zarr's padded edge chunks are clipped.
+arrays with dtype \verb{<f8}, \verb{<f4}, \verb{<i4}, \verb{<i2}, \verb{|i1}, \verb{<u2}, \verb{|u1} or
+\verb{|b1}, compressor \code{null} or \code{zlib}, order \code{C} or \code{F}, and missing chunk
+files (read as \code{fill_value}). Zarr's padded edge chunks are clipped.
 }
 \details{
 The array's type follows the dtype: floats give a double array, integers
-an integer array, `|b1` a logical array. With `unpack = TRUE`, CF
-packing attributes found in `.zattrs` are applied inside the fetch:
-values equal to `_FillValue` or `missing_value` become `NA`, and if
-`scale_factor` or `add_offset` is present the array is double, holding
-the unpacked values. The Zarr `fill_value` itself is not treated as
+an integer array, \verb{|b1} a logical array. With \code{unpack = TRUE}, CF
+packing attributes found in \code{.zattrs} are applied inside the fetch:
+values equal to \verb{_FillValue} or \code{missing_value} become \code{NA}, and if
+\code{scale_factor} or \code{add_offset} is present the array is double, holding
+the unpacked values. The Zarr \code{fill_value} itself is not treated as
 missing.
 
-A C-order Zarr array of shape `(s1, ..., sn)` is returned with R `dim`
-`c(sn, ..., s1)`: C-order bytes are already column-major for the
+A C-order Zarr array of shape \verb{(s1, ..., sn)} is returned with R \code{dim}
+\code{c(sn, ..., s1)}: C-order bytes are already column-major for the
 reversed shape, so no transposition is ever done.
 }

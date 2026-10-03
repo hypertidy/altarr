@@ -12,7 +12,7 @@ altarr_plan(x, ...)
 \item{...}{one subscript per dimension (missing means all)}
 }
 \description{
-One row per chunk that `x[i, j, k]` would touch: 0-based chunk
+One row per chunk that \code{x[i, j, k]} would touch: 0-based chunk
 coordinates, plus each chunk's 1-based start and its extent along every
 dimension. The plan is a table; the array is what assembling it gives.
 }

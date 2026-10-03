@@ -11,10 +11,10 @@ altarr_extract(x, ..., drop = TRUE)
 
 \item{...}{one subscript per dimension (missing means all)}
 
-\item{drop}{as for `[`}
+\item{drop}{as for \code{[}}
 }
 \description{
-Same semantics as `x[i, j, k, drop = drop]`, but the per-dimension
+Same semantics as \code{x[i, j, k, drop = drop]}, but the per-dimension
 subscripts are handed to the ALTREP object whole: the touched chunks are
 planned as a cartesian product and fetched in one call. This is what
 base R's ArraySubset could do if it offered its normalized subscripts to

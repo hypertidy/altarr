@@ -15,24 +15,24 @@ altarr(
 \arguments{
 \item{dim}{integer dimensions.}
 
-\item{chunk}{integer chunk shape (recycled to `length(dim)`).}
+\item{chunk}{integer chunk shape (recycled to \code{length(dim)}).}
 
 \item{fetch}{a function taking an integer matrix of 0-based chunk
 coordinates (one row per chunk, one column per dimension) and returning
 a list of vectors, one per row, in column-major order and clipped at the
-array edge. Chunks should be of the array's `type`; other numeric or
-logical vectors are coerced as `as.double()`, `as.integer()` or
-`as.logical()` would.}
+array edge. Chunks should be of the array's \code{type}; other numeric or
+logical vectors are coerced as \code{as.double()}, \code{as.integer()} or
+\code{as.logical()} would.}
 
 \item{dimnames}{optional dimnames.}
 
-\item{type}{the array's type: `"double"`, `"integer"` or `"logical"`.}
+\item{type}{the array's type: \code{"double"}, \code{"integer"} or \code{"logical"}.}
 }
 \value{
 a lazy array.
 }
 \description{
-Returns an ordinary double, integer or logical vector with a `dim`
+Returns an ordinary double, integer or logical vector with a \code{dim}
 attribute and no class. It is an ALTREP object: values are obtained chunk
-by chunk from `fetch` only when base R asks for them.
+by chunk from \code{fetch} only when base R asks for them.
 }

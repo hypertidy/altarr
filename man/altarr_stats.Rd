@@ -10,18 +10,18 @@ altarr_stats(x)
 \item{x}{an altarr array}
 }
 \description{
-`elt` counts per-element reads (the `x[i, j, k]` path), `extract_subset`
-counts planned subset calls (`x[i]`, `x[cbind(...)]`), `hyperslab` counts
-[altarr_extract()] calls, `fetch_calls` counts calls to the fetch function
-(round trips) and `chunks_fetched` the chunks they returned. `reduce`
-counts whole-array `sum()`, `min()` and `max()` calls, which stream the
-chunk grid in batches of `getOption("altarr.batch_chunks", 64)` chunks
+\code{elt} counts per-element reads (the \code{x[i, j, k]} path), \code{extract_subset}
+counts planned subset calls (\code{x[i]}, \code{x[cbind(...)]}), \code{hyperslab} counts
+\code{\link[=altarr_extract]{altarr_extract()}} calls, \code{fetch_calls} counts calls to the fetch function
+(round trips) and \code{chunks_fetched} the chunks they returned. \code{reduce}
+counts whole-array \code{sum()}, \code{min()} and \code{max()} calls, which stream the
+chunk grid in batches of \code{getOption("altarr.batch_chunks", 64)} chunks
 (one fetch call per batch) without caching what they read.
-`region` counts contiguous-run reads from functions R iterates by region
-(`mean()`, `prod()`, `anyNA()`, and reductions on R's wrapper class).
-`evictions` counts chunks dropped from the cache to keep it within
-its budget. Also reported: `cache_bytes` (bytes currently cached) and
-`cache_budget` (`getOption("altarr.cache_bytes")`, default 256 MiB).
+\code{region} counts contiguous-run reads from functions R iterates by region
+(\code{mean()}, \code{prod()}, \code{anyNA()}, and reductions on R's wrapper class).
+\code{evictions} counts chunks dropped from the cache to keep it within
+its budget. Also reported: \code{cache_bytes} (bytes currently cached) and
+\code{cache_budget} (\code{getOption("altarr.cache_bytes")}, default 256 MiB).
 The cache is least recently used first, and shared by an array and
 its copies.
 }
