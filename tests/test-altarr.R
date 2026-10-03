@@ -421,7 +421,14 @@ for (e in list(quote(x[1:50]), quote(x[-(1:9000)]), quote(x[cbind(1:5, 1:5, 1:5)
                quote(max(x, na.rm = TRUE)), quote(mean(x)), quote(prod(x)), quote(anyNA(x)))) {
   if (how(e) != "planned") stop("expected planned: ", deparse(e))
 }
-for (e in list(quote(x[1:20, 1:5, 1]), quote(x[[7]]), quote(is.na(x)), quote(head(x)))) {
+## x[i, j, k] (and head() on an array, which indexes that way) is planned
+## when R offers ALTREP its array subscripts, element by element otherwise
+rect <- list(quote(x[1:20, 1:5, 1]), quote(head(x)))
+rect_how <- if (altarr:::has_array_subset()) "planned" else "element"
+for (e in rect) {
+  if (how(e) != rect_how) stop("expected ", rect_how, ": ", deparse(e))
+}
+for (e in list(quote(x[[7]]), quote(is.na(x)))) {
   if (how(e) != "element") stop("expected element by element: ", deparse(e))
 }
 for (e in list(quote(x + 1), quote(range(x, na.rm = TRUE)), quote(c(x)), quote(aperm(x)),
@@ -453,6 +460,64 @@ if (nzchar(Sys.getenv("_R_CHECK_PACKAGE_NAME_")) || file.exists(rs) ||
   if (!identical(trimws(tail(out, 1)), "3")) {
     stop("fresh session read failed:\n", paste(out, collapse = "\n"))
   }
+}
+
+## the proposed ALTREP array-subset method, when this R has it
+if (altarr:::has_array_subset()) {
+  hp <- altarr_example_zarr()
+  hx <- altarr_zarr_v2(hp)
+  href <- array(as.double(seq_len(prod(dim(hx))) - 1), dim(hx))
+  planned <- function(expr_x, expr_ref, calls = 1) {
+    altarr_reset(hx)
+    got <- expr_x()
+    s <- altarr_stats(hx)
+    stopifnot(identical(got, expr_ref()), s[["elt"]] == 0,
+              s[["array_subset"]] == 1, s[["fetch_calls"]] <= calls)
+  }
+  ## rectangles, drop, NA, negative, logical, reordering, repeats
+  planned(function() hx[1:40, 1:20, 1:3], function() href[1:40, 1:20, 1:3])
+  planned(function() hx[5, 1:20, 3], function() href[5, 1:20, 3])
+  planned(function() hx[5, 1:20, 3, drop = FALSE],
+          function() href[5, 1:20, 3, drop = FALSE])
+  planned(function() hx[c(3, NA, 70), c(50, 1), 30],
+          function() href[c(3, NA, 70), c(50, 1), 30])
+  planned(function() hx[-(1:60), 50:1, c(TRUE, FALSE)],
+          function() href[-(1:60), 50:1, c(TRUE, FALSE)])
+  planned(function() hx[c(1, 1, 1), 2, ], function() href[c(1, 1, 1), 2, ],
+          calls = 2)   # all 30 layers: 5 chunks, one batch
+  ## zero-length extents
+  planned(function() hx[integer(0), 1:3, 1], function() href[integer(0), 1:3, 1],
+          calls = 0)
+  ## out of bounds is still R's error, before the method is called
+  stopifnot(inherits(try(hx[71, 1, 1], silent = TRUE), "try-error"))
+  ## dimnames: R subsets them, the method only supplies values
+  hn <- altarr_zarr_v2(hp)
+  dimnames(hn) <- list(paste0("x", 1:70), NULL, paste0("t", 1:30))
+  rn <- href; dimnames(rn) <- dimnames(hn)
+  altarr_reset(hn)
+  stopifnot(identical(hn[c("x2", "x9"), 3:4, "t30"], rn[c("x2", "x9"), 3:4, "t30"]),
+            altarr_stats(hn)[["array_subset"]] == 1, altarr_stats(hn)[["elt"]] == 0)
+  ## a matrix goes through MatrixSubset
+  m <- altarr(c(10L, 7L), c(4L, 3L), function(ch) lapply(seq_len(nrow(ch)), function(r) {
+    st <- ch[r, ] * c(4L, 3L) + 1L; en <- pmin(st + c(3L, 2L), c(10L, 7L))
+    as.vector(outer(st[1]:en[1], (st[2]:en[2] - 1) * 10, "+"))
+  }), type = "integer")
+  mref <- matrix(1:70, 10, 7)
+  stopifnot(identical(m[c(2, 10, NA), 7:5], mref[c(2, 10, NA), 7:5]),
+            altarr_stats(m)[["array_subset"]] == 1, altarr_stats(m)[["elt"]] == 0)
+  ## reshaped: the method declines, R reads element by element, same answer
+  hr <- altarr_zarr_v2(hp)
+  dim(hr) <- c(350L, 300L)
+  altarr_reset(hr)
+  stopifnot(identical(hr[1:3, 299:300], matrix(href, 350, 300)[1:3, 299:300]),
+            altarr_stats(hr)[["array_subset"]] == 0)
+  ## materialized: the method declines, R reads memory
+  hm <- altarr_zarr_v2(hp)
+  invisible(hm * 1)
+  altarr_reset(hm, cache = FALSE)
+  stopifnot(identical(hm[1:2, 1, 1], href[1:2, 1, 1]),
+            altarr_stats(hm)[["array_subset"]] == 0)
+  cat("array-subset hook: tests passed\n")
 }
 
 cat("all tests passed\n")

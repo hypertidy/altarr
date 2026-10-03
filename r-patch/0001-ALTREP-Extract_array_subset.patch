@@ -1,0 +1,356 @@
+From 861368236dd8476fc6aa478d5dd1d9f27ad4bc71 Mon Sep 17 00:00:00 2001
+From: Michael Sumner <mdsumner@gmail.com>
+Date: Sun, 4 Oct 2026 08:57:13 +1000
+Subject: [PATCH] ALTREP: Extract_array_subset method for x[i, j, ...]
+
+Offer the normalized subscripts of MatrixSubset/ArraySubset to an ALTREP
+class before extracting element by element. R checks bounds and keeps
+setting dim, dimnames and drop; a NULL return falls back to the existing
+loop. The method table is allocated by R, so adding a method does not
+change the ABI for packages. Wrapper classes forward the method.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01TowCbPXVpB8oRsDNNywRUz
+---
+ doc/NEWS.Rd                | 13 ++++++++++-
+ src/include/Defn.h         |  1 +
+ src/include/R_ext/Altrep.h | 10 ++++++++
+ src/main/altclasses.c      | 15 ++++++++++++
+ src/main/altrep.c          | 23 ++++++++++++++++++-
+ src/main/subset.c          | 47 +++++++++++++++++++++++++++++++++++++-
+ 6 files changed, 106 insertions(+), 3 deletions(-)
+
+diff --git a/doc/NEWS.Rd b/doc/NEWS.Rd
+index d6ba461..9a86b96 100644
+--- a/doc/NEWS.Rd
++++ b/doc/NEWS.Rd
+@@ -134,7 +134,18 @@
+ 
+   \subsection{C-Level Facilities}{
+     \itemize{
+-      \item .
++      \item \abbr{ALTREP} vector classes can now supply an
++      \code{Extract_array_subset} method, set with
++      \code{R_set_altvec_Extract_array_subset_method()}.  For
++      \code{x[i, j, ...]} on an \abbr{ALTREP} array, R offers the
++      method the normalized subscripts (one 1-based integer vector per
++      dimension, \code{NA} allowed) before reading element by element, so
++      a class backed by chunked or remote storage can plan a single read.
++      R still checks bounds and sets \code{dim}, \code{dimnames} and
++      \code{drop}.  A class without the method, or one that returns
++      \code{NULL}, is extracted as before.  Wrapper objects forward the
++      method.  \file{R_ext/Altrep.h} defines
++      \code{R_ALTREP_HAS_EXTRACT_ARRAY_SUBSET} for conditional compilation.
+     }
+   }
+ 
+diff --git a/src/include/Defn.h b/src/include/Defn.h
+index 8577edc..935c896 100644
+--- a/src/include/Defn.h
++++ b/src/include/Defn.h
+@@ -752,6 +752,7 @@ void *ALTVEC_DATAPTR(SEXP x);
+ const void *ALTVEC_DATAPTR_RO(SEXP x);
+ const void *ALTVEC_DATAPTR_OR_NULL(SEXP x);
+ SEXP ALTVEC_EXTRACT_SUBSET(SEXP x, SEXP indx, SEXP call);
++SEXP ALTVEC_EXTRACT_ARRAY_SUBSET(SEXP x, SEXP subs, SEXP dim, SEXP call);
+ Rboolean R_is_compact_intseq(SEXP x);
+ void *(STDVEC_DATAPTR)(SEXP x);
+ 
+diff --git a/src/include/R_ext/Altrep.h b/src/include/R_ext/Altrep.h
+index 0160dcc..dea70dd 100644
+--- a/src/include/R_ext/Altrep.h
++++ b/src/include/R_ext/Altrep.h
+@@ -76,6 +76,15 @@ typedef R_xlen_t (*R_altrep_Length_method_t)(SEXP);
+ typedef void *(*R_altvec_Dataptr_method_t)(SEXP, Rboolean);
+ typedef const void *(*R_altvec_Dataptr_or_null_method_t)(SEXP);
+ typedef SEXP (*R_altvec_Extract_subset_method_t)(SEXP, SEXP, SEXP);
++/* Extract_array_subset(x, subs, dim, call): x[i, j, ...] for an array x
++   with dimensions 'dim'. 'subs' is a list with one integer vector per
++   dimension holding 1-based, in-range indices or NA_INTEGER, as
++   normalized by R. Return a vector of TYPEOF(x) and length
++   prod(lengths(subs)), in column-major order and without attributes, or
++   NULL to let R extract element by element. R sets dim, dimnames and
++   drop as usual. */
++typedef SEXP (*R_altvec_Extract_array_subset_method_t)(SEXP, SEXP, SEXP, SEXP);
++#define R_ALTREP_HAS_EXTRACT_ARRAY_SUBSET 1
+ 
+ typedef int (*R_altinteger_Elt_method_t)(SEXP, R_xlen_t);
+ typedef R_xlen_t
+@@ -135,6 +144,7 @@ DECLARE_METHOD_SETTER(altrep, Length)
+ DECLARE_METHOD_SETTER(altvec, Dataptr)
+ DECLARE_METHOD_SETTER(altvec, Dataptr_or_null)
+ DECLARE_METHOD_SETTER(altvec, Extract_subset)
++DECLARE_METHOD_SETTER(altvec, Extract_array_subset)
+ 
+ DECLARE_METHOD_SETTER(altinteger, Elt)
+ DECLARE_METHOD_SETTER(altinteger, Get_region)
+diff --git a/src/main/altclasses.c b/src/main/altclasses.c
+index b852c5f..8a555ed 100644
+--- a/src/main/altclasses.c
++++ b/src/main/altclasses.c
+@@ -1587,6 +1587,14 @@ static SEXP wrapper_Extract_subset(SEXP x, SEXP indx, SEXP call)
+   return ExtractSubset(WRAPPER_WRAPPED(x), indx, call);
+ }
+ 
++static SEXP wrapper_Extract_array_subset(SEXP x, SEXP subs, SEXP dim,
++					 SEXP call)
++{
++    /* the wrapper holds the attributes, so 'dim' is passed along */
++    SEXP w = WRAPPER_WRAPPED(x);
++    return ALTREP(w) ? ALTVEC_EXTRACT_ARRAY_SUBSET(w, subs, dim, call) : NULL;
++}
++
+ 
+ /*
+  * ALTINTEGER Methods
+@@ -1793,6 +1801,7 @@ static void InitWrapIntegerClass(DllInfo *dll)
+     R_set_altvec_Dataptr_method(cls, wrapper_Dataptr);
+     R_set_altvec_Dataptr_or_null_method(cls, wrapper_Dataptr_or_null);
+     R_set_altvec_Extract_subset_method(cls, wrapper_Extract_subset);
++    R_set_altvec_Extract_array_subset_method(cls, wrapper_Extract_array_subset);
+ 
+     /* override ALTINTEGER methods */
+     R_set_altinteger_Elt_method(cls, wrapper_integer_Elt);
+@@ -1818,6 +1827,7 @@ static void InitWrapLogicalClass(DllInfo *dll)
+     R_set_altvec_Dataptr_method(cls, wrapper_Dataptr);
+     R_set_altvec_Dataptr_or_null_method(cls, wrapper_Dataptr_or_null);
+     R_set_altvec_Extract_subset_method(cls, wrapper_Extract_subset);
++    R_set_altvec_Extract_array_subset_method(cls, wrapper_Extract_array_subset);
+ 
+     /* override ALTLOGICAL methods */
+     R_set_altlogical_Elt_method(cls, wrapper_logical_Elt);
+@@ -1843,6 +1853,7 @@ static void InitWrapRealClass(DllInfo *dll)
+     R_set_altvec_Dataptr_method(cls, wrapper_Dataptr);
+     R_set_altvec_Dataptr_or_null_method(cls, wrapper_Dataptr_or_null);
+     R_set_altvec_Extract_subset_method(cls, wrapper_Extract_subset);
++    R_set_altvec_Extract_array_subset_method(cls, wrapper_Extract_array_subset);
+ 
+     /* override ALTREAL methods */
+     R_set_altreal_Elt_method(cls, wrapper_real_Elt);
+@@ -1868,6 +1879,7 @@ static void InitWrapComplexClass(DllInfo *dll)
+     R_set_altvec_Dataptr_method(cls, wrapper_Dataptr);
+     R_set_altvec_Dataptr_or_null_method(cls, wrapper_Dataptr_or_null);
+     R_set_altvec_Extract_subset_method(cls, wrapper_Extract_subset);
++    R_set_altvec_Extract_array_subset_method(cls, wrapper_Extract_array_subset);
+ 
+     /* override ALTCOMPLEX methods */
+     R_set_altcomplex_Elt_method(cls, wrapper_complex_Elt);
+@@ -1891,6 +1903,7 @@ static void InitWrapRawClass(DllInfo *dll)
+     R_set_altvec_Dataptr_method(cls, wrapper_Dataptr);
+     R_set_altvec_Dataptr_or_null_method(cls, wrapper_Dataptr_or_null);
+     R_set_altvec_Extract_subset_method(cls, wrapper_Extract_subset);
++    R_set_altvec_Extract_array_subset_method(cls, wrapper_Extract_array_subset);
+ 
+     /* override ALTRAW methods */
+     R_set_altraw_Elt_method(cls, wrapper_raw_Elt);
+@@ -1914,6 +1927,7 @@ static void InitWrapStringClass(DllInfo *dll)
+     R_set_altvec_Dataptr_method(cls, wrapper_Dataptr);
+     R_set_altvec_Dataptr_or_null_method(cls, wrapper_Dataptr_or_null);
+     R_set_altvec_Extract_subset_method(cls, wrapper_Extract_subset);
++    R_set_altvec_Extract_array_subset_method(cls, wrapper_Extract_array_subset);
+ 
+     /* override ALTSTRING methods */
+     R_set_altstring_Elt_method(cls, wrapper_string_Elt);
+@@ -1939,6 +1953,7 @@ static void InitWrapListClass(DllInfo *dll)
+     R_set_altvec_Dataptr_method(cls, wrapper_Dataptr);
+     R_set_altvec_Dataptr_or_null_method(cls, wrapper_Dataptr_or_null);
+     R_set_altvec_Extract_subset_method(cls, wrapper_Extract_subset);
++    R_set_altvec_Extract_array_subset_method(cls, wrapper_Extract_array_subset);
+ 
+     /* override ALTLIST methods */
+     R_set_altlist_Elt_method(cls, wrapper_list_Elt);
+diff --git a/src/main/altrep.c b/src/main/altrep.c
+index 4023884..1f29451 100644
+--- a/src/main/altrep.c
++++ b/src/main/altrep.c
+@@ -150,7 +150,8 @@ static void SET_ALTREP_CLASS(SEXP x, SEXP class)
+     ALTREP_METHODS;					\
+     R_altvec_Dataptr_method_t Dataptr;			\
+     R_altvec_Dataptr_or_null_method_t Dataptr_or_null;	\
+-    R_altvec_Extract_subset_method_t Extract_subset
++    R_altvec_Extract_subset_method_t Extract_subset;	\
++    R_altvec_Extract_array_subset_method_t Extract_array_subset
+ 
+ #define ALTINTEGER_METHODS				\
+     ALTVEC_METHODS;					\
+@@ -391,6 +392,12 @@ attribute_hidden SEXP ALTVEC_EXTRACT_SUBSET(SEXP x, SEXP indx, SEXP call)
+     return ALTVEC_DISPATCH(Extract_subset, x, indx, call);
+ }
+ 
++attribute_hidden SEXP
++ALTVEC_EXTRACT_ARRAY_SUBSET(SEXP x, SEXP subs, SEXP dim, SEXP call)
++{
++    return ALTVEC_DISPATCH(Extract_array_subset, x, subs, dim, call);
++}
++
+ 
+ /*
+  * Typed ALTVEC support
+@@ -750,6 +757,12 @@ static SEXP altvec_Extract_subset_default(SEXP x, SEXP indx, SEXP call)
+     return NULL;
+ }
+ 
++static SEXP altvec_Extract_array_subset_default(SEXP x, SEXP subs, SEXP dim,
++						SEXP call)
++{
++    return NULL;
++}
++
+ static int altinteger_Elt_default(SEXP x, R_xlen_t i) { return INTEGER(x)[i]; }
+ 
+ static R_xlen_t
+@@ -883,6 +896,7 @@ static altinteger_methods_t altinteger_default_methods = {
+     .Dataptr = altvec_Dataptr_default,
+     .Dataptr_or_null = altvec_Dataptr_or_null_default,
+     .Extract_subset = altvec_Extract_subset_default,
++    .Extract_array_subset = altvec_Extract_array_subset_default,
+     .Elt = altinteger_Elt_default,
+     .Get_region = altinteger_Get_region_default,
+     .Is_sorted = altinteger_Is_sorted_default,
+@@ -904,6 +918,7 @@ static altreal_methods_t altreal_default_methods = {
+     .Dataptr = altvec_Dataptr_default,
+     .Dataptr_or_null = altvec_Dataptr_or_null_default,
+     .Extract_subset = altvec_Extract_subset_default,
++    .Extract_array_subset = altvec_Extract_array_subset_default,
+     .Elt = altreal_Elt_default,
+     .Get_region = altreal_Get_region_default,
+     .Is_sorted = altreal_Is_sorted_default,
+@@ -926,6 +941,7 @@ static altlogical_methods_t altlogical_default_methods = {
+     .Dataptr = altvec_Dataptr_default,
+     .Dataptr_or_null = altvec_Dataptr_or_null_default,
+     .Extract_subset = altvec_Extract_subset_default,
++    .Extract_array_subset = altvec_Extract_array_subset_default,
+     .Elt = altlogical_Elt_default,
+     .Get_region = altlogical_Get_region_default,
+     .Is_sorted = altlogical_Is_sorted_default,
+@@ -946,6 +962,7 @@ static altraw_methods_t altraw_default_methods = {
+     .Dataptr = altvec_Dataptr_default,
+     .Dataptr_or_null = altvec_Dataptr_or_null_default,
+     .Extract_subset = altvec_Extract_subset_default,
++    .Extract_array_subset = altvec_Extract_array_subset_default,
+     .Elt = altraw_Elt_default,
+     .Get_region = altraw_Get_region_default
+ };
+@@ -965,6 +982,7 @@ static altcomplex_methods_t altcomplex_default_methods = {
+     .Dataptr = altvec_Dataptr_default,
+     .Dataptr_or_null = altvec_Dataptr_or_null_default,
+     .Extract_subset = altvec_Extract_subset_default,
++    .Extract_array_subset = altvec_Extract_array_subset_default,
+     .Elt = altcomplex_Elt_default,
+     .Get_region = altcomplex_Get_region_default
+ };
+@@ -983,6 +1001,7 @@ static altstring_methods_t altstring_default_methods = {
+     .Dataptr = altvec_Dataptr_default,
+     .Dataptr_or_null = altvec_Dataptr_or_null_default,
+     .Extract_subset = altvec_Extract_subset_default,
++    .Extract_array_subset = altvec_Extract_array_subset_default,
+     .Elt = altstring_Elt_default,
+     .Set_elt = altstring_Set_elt_default,
+     .Is_sorted = altstring_Is_sorted_default,
+@@ -1003,6 +1022,7 @@ static altlist_methods_t altlist_default_methods = {
+     .Dataptr = altlist_Dataptr_default,
+     .Dataptr_or_null = altlist_Dataptr_or_null_default,
+     .Extract_subset = altvec_Extract_subset_default,
++    .Extract_array_subset = altvec_Extract_array_subset_default,
+     .Elt = altlist_Elt_default,
+     .Set_elt = altlist_Set_elt_default
+ };
+@@ -1106,6 +1126,7 @@ DEFINE_METHOD_SETTER(altrep, Length)
+ DEFINE_METHOD_SETTER(altvec, Dataptr)
+ DEFINE_METHOD_SETTER(altvec, Dataptr_or_null)
+ DEFINE_METHOD_SETTER(altvec, Extract_subset)
++DEFINE_METHOD_SETTER(altvec, Extract_array_subset)
+ 
+ DEFINE_METHOD_SETTER(altinteger, Elt)
+ DEFINE_METHOD_SETTER(altinteger, Get_region)
+diff --git a/src/main/subset.c b/src/main/subset.c
+index 1147c72..cde09b4 100644
+--- a/src/main/subset.c
++++ b/src/main/subset.c
+@@ -305,6 +305,42 @@ SEXP int_arraySubscript(int dim, SEXP s, SEXP dims, SEXP x, SEXP call);
+ 	}							\
+     } while (0)
+ 
++/* Offer the normalized subscripts of x[i, j, ...] to an ALTREP object.
++   's' is the pairlist of k subscripts after int_arraySubscript(), 'n' the
++   number of values. Returns the values (a vector of TYPEOF(x) and length
++   n, column-major) or R_NilValue if x is not ALTREP or its class declines,
++   in which case the caller extracts element by element as before. */
++static SEXP ALTREP_ArraySubset(SEXP x, SEXP s, int k, R_xlen_t n, SEXP call)
++{
++    if (! ALTREP(x))
++	return R_NilValue;
++    SEXP dim = getAttrib(x, R_DimSymbol);
++    const int *pdim = INTEGER_RO(dim);
++    SEXP subs = PROTECT(allocVector(VECSXP, k));
++    SEXP r = s;
++    for (int i = 0; i < k; i++, r = CDR(r)) {
++	/* the method only ever sees in-range indices or NA */
++	const int *ps = INTEGER_RO(CAR(r));
++	for (R_xlen_t j = 0; j < XLENGTH(CAR(r)); j++)
++	    if (ps[j] != NA_INTEGER && (ps[j] < 1 || ps[j] > pdim[i]))
++		errorcallOutOfBounds(x, i, ps[j], call);
++	SET_VECTOR_ELT(subs, i, CAR(r));
++    }
++    SEXP ans = ALTVEC_EXTRACT_ARRAY_SUBSET(x, subs, dim, call);
++    if (ans == NULL) {
++	UNPROTECT(1); /* subs */
++	return R_NilValue;
++    }
++    PROTECT(ans);
++    if (TYPEOF(ans) != TYPEOF(x) || XLENGTH(ans) != n ||
++	ATTRIB(ans) != R_NilValue)
++	errorcall(call, _("invalid result from ALTREP array subset method"));
++    if (MAYBE_REFERENCED(ans))
++	ans = duplicate(ans); /* R sets attributes on the result */
++    UNPROTECT(2); /* ans, subs */
++    return ans;
++}
++
+ static SEXP MatrixSubset(SEXP x, SEXP s, SEXP call, int drop)
+ {
+     SEXP attr, result, sr, sc, dim;
+@@ -327,9 +363,13 @@ static SEXP MatrixSubset(SEXP x, SEXP s, SEXP call, int drop)
+ 	error(_("dimensions would exceed maximum size of array"));
+     PROTECT(sr);
+     PROTECT(sc);
+-    result = allocVector(TYPEOF(x), (R_xlen_t) nrs * (R_xlen_t) ncs);
+     const int *psr = INTEGER_RO(sr);
+     const int *psc = INTEGER_RO(sc);
++    PROTECT(result = ALTREP_ArraySubset(x, s, 2,
++					(R_xlen_t) nrs * (R_xlen_t) ncs, call));
++    if (result == R_NilValue) {
++    UNPROTECT(1);
++    result = allocVector(TYPEOF(x), (R_xlen_t) nrs * (R_xlen_t) ncs);
+     PROTECT(result);
+     switch(TYPEOF(x)) {
+     case LGLSXP:
+@@ -369,6 +409,7 @@ static SEXP MatrixSubset(SEXP x, SEXP s, SEXP call, int drop)
+ 	errorcall(call, _("matrix subscripting not handled for this type"));
+ 	break;
+     }
++    } /* not offered to, or declined by, ALTREP */
+ 
+     if(nrs >= 0 && ncs >= 0) {
+ 	PROTECT(attr = allocVector(INTSXP, 2));
+@@ -501,6 +542,9 @@ static SEXP ArraySubset(SEXP x, SEXP s, SEXP call, int drop)
+ 	}
+ 
+     /* Transfer the subset elements from "x" to "a". */
++    PROTECT(result = ALTREP_ArraySubset(x, s, k, n, call));
++    if (result == R_NilValue) {
++    UNPROTECT(1);
+     PROTECT(result = allocVector(mode, n));
+     switch (mode) {
+     case LGLSXP:
+@@ -540,6 +584,7 @@ static SEXP ArraySubset(SEXP x, SEXP s, SEXP call, int drop)
+ 	errorcall(call, _("array subscripting not handled for this type"));
+ 	break;
+     }
++    } /* not offered to, or declined by, ALTREP */
+ 
+     SEXP new_dim = PROTECT(allocVector(INTSXP, k));
+     for(int i = 0 ; i < k ; i++)
+-- 
+2.43.0
+

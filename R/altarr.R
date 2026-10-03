@@ -73,6 +73,10 @@ is_altarr <- function(x) .Call(C_altarr_is, x)
 #' `cache_budget` (`getOption("altarr.cache_bytes")`, default 256 MiB).
 #' The cache is least recently used first, and shared by an array and
 #' its copies.
+#' `array_subset` counts `x[i, j, k]` calls planned through the proposed
+#' ALTREP array-subset method. It stays at zero unless altarr was built
+#' against an R that has the method (see `altarr:::has_array_subset()`);
+#' otherwise `x[i, j, k]` reads element by element and counts as `elt`.
 #' @param x an altarr array
 #' @return a named numeric vector of counters and cache state.
 #' @examples
@@ -193,3 +197,8 @@ altarr_plan <- function(x, ...) {
   }
   plan
 }
+
+## TRUE if altarr was compiled against an R whose ALTREP offers the
+## normalized subscripts of x[i, j, ...] (the proposed
+## Extract_array_subset method); then x[i, j, k] is one planned read.
+has_array_subset <- function() .Call(C_altarr_has_array_subset)

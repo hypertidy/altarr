@@ -27,6 +27,11 @@ its budget. Also reported: \code{cache_bytes} (bytes currently cached) and
 \code{cache_budget} (\code{getOption("altarr.cache_bytes")}, default 256 MiB).
 The cache is least recently used first, and shared by an array and
 its copies.
+
+\code{array_subset} counts \code{x[i, j, k]} calls planned through the proposed
+ALTREP array-subset method. It stays at zero unless altarr was built
+against an R that has the method (see \code{altarr:::has_array_subset()});
+otherwise \code{x[i, j, k]} reads element by element and counts as \code{elt}.
 }
 \examples{
 x <- altarr_zarr_v2(altarr_example_zarr())

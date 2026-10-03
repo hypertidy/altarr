@@ -55,10 +55,12 @@ enum { S_DIM, S_CHUNK, S_FETCH, S_NCHUNK, S_CACHE, S_STATS, S_TICK, S_STATE,
    S_TYPE: the array's SEXPTYPE (REALSXP, INTSXP or LGLSXP) */
 /* counters */
 enum { ST_ELT, ST_FETCH_CALLS, ST_CHUNKS_FETCHED, ST_EXTRACT,
-       ST_HYPERSLAB, ST_MATERIALIZE, ST_REDUCE, ST_EVICT, ST_REGION, ST_LEN };
+       ST_HYPERSLAB, ST_MATERIALIZE, ST_REDUCE, ST_EVICT, ST_REGION,
+       ST_ARRAY_SUBSET, ST_LEN };
 static const char *stat_names[ST_LEN] = {
     "elt", "fetch_calls", "chunks_fetched", "extract_subset",
-    "hyperslab", "materialize", "reduce", "evictions", "region"
+    "hyperslab", "materialize", "reduce", "evictions", "region",
+    "array_subset"
 };
 /* data2: the materialized vector, or R_NilValue */
 
@@ -948,6 +950,16 @@ static SEXP C_altarr_is(SEXP x)
     return ScalarLogical(find_altarr(x) != R_NilValue);
 }
 
+/* was this build compiled against an R that offers array subscripts? */
+static SEXP C_altarr_has_array_subset(void)
+{
+#ifdef R_ALTREP_HAS_EXTRACT_ARRAY_SUBSET
+    return ScalarLogical(TRUE);
+#else
+    return ScalarLogical(FALSE);
+#endif
+}
+
 static SEXP C_altarr_wrapped(SEXP x)
 {
     SEXP s = find_altarr(x);
@@ -1002,9 +1014,32 @@ static SEXP C_altarr_reset(SEXP x, SEXP drop_cache)
 /* What ArraySubset could do with its 'subs': plan, fetch once, assemble.
    'subs' is a list of 1-based integer index vectors (NA allowed), one per
    dimension, already normalized by R's own indexing rules. */
+static SEXP hyperslab_read(SEXP x, SEXP subs, int counter, int set_dim);
+
 static SEXP C_altarr_hyperslab(SEXP x, SEXP subs)
 {
-    x = check_altarr(x);
+    return hyperslab_read(check_altarr(x), subs, ST_HYPERSLAB, 1);
+}
+
+#ifdef R_ALTREP_HAS_EXTRACT_ARRAY_SUBSET
+/* The proposed ALTREP method: R's MatrixSubset/ArraySubset offer the
+   normalized subscripts of x[i, j, ...] before reading element by element.
+   Decline (NULL) once materialized, or if the array has been given other
+   dimensions than the recipe's, so R falls back to its own loop. R sets
+   dim, dimnames and drop on the result. */
+static SEXP altarr_Extract_array_subset(SEXP x, SEXP subs, SEXP dim, SEXP call)
+{
+    if (R_altrep_data2(x) != R_NilValue) return NULL;
+    SEXP sdim = VECTOR_ELT(SPEC(x), S_DIM);
+    if (TYPEOF(dim) != INTSXP || XLENGTH(dim) != XLENGTH(sdim) ||
+        memcmp(INTEGER_RO(dim), INTEGER_RO(sdim), XLENGTH(dim) * sizeof(int)))
+        return NULL;
+    return hyperslab_read(x, subs, ST_ARRAY_SUBSET, 0);
+}
+#endif
+
+static SEXP hyperslab_read(SEXP x, SEXP subs, int counter, int set_dim)
+{
     SEXP spec = SPEC(x);
     const int *dim = INTEGER(VECTOR_ELT(spec, S_DIM));
     const int *cs = INTEGER(VECTOR_ELT(spec, S_CHUNK));
@@ -1043,7 +1078,7 @@ static SEXP C_altarr_hyperslab(SEXP x, SEXP subs)
             }
         }
     }
-    bump(spec, ST_HYPERSLAB, 1);
+    bump(spec, counter, 1);
 
     /* plan: cartesian product of touched chunks, fetched in one call */
     R_xlen_t np = 1;
@@ -1103,10 +1138,13 @@ static SEXP C_altarr_hyperslab(SEXP x, SEXP subs)
             }
         }
     }
-    SEXP rdim = PROTECT(allocVector(INTSXP, k));
-    for (int d = 0; d < k; d++) INTEGER(rdim)[d] = len[d];
-    setAttrib(res, R_DimSymbol, rdim);
-    UNPROTECT(3);
+    if (set_dim) {
+        SEXP rdim = PROTECT(allocVector(INTSXP, k));
+        for (int d = 0; d < k; d++) INTEGER(rdim)[d] = len[d];
+        setAttrib(res, R_DimSymbol, rdim);
+        UNPROTECT(1);
+    }
+    UNPROTECT(2);
     return res;
 }
 
@@ -1118,6 +1156,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"C_altarr_reset", (DL_FUNC) &C_altarr_reset, 2},
     {"C_altarr_chunk", (DL_FUNC) &C_altarr_chunk, 1},
     {"C_altarr_wrapped", (DL_FUNC) &C_altarr_wrapped, 1},
+    {"C_altarr_has_array_subset", (DL_FUNC) &C_altarr_has_array_subset, 0},
     {"C_altarr_hyperslab", (DL_FUNC) &C_altarr_hyperslab, 2},
     {NULL, NULL, 0}
 };
@@ -1132,6 +1171,9 @@ static void set_common_methods(R_altrep_class_t cls)
     R_set_altvec_Dataptr_method(cls, altarr_Dataptr);
     R_set_altvec_Dataptr_or_null_method(cls, altarr_Dataptr_or_null);
     R_set_altvec_Extract_subset_method(cls, altarr_Extract_subset);
+#ifdef R_ALTREP_HAS_EXTRACT_ARRAY_SUBSET
+    R_set_altvec_Extract_array_subset_method(cls, altarr_Extract_array_subset);
+#endif
 }
 
 void R_init_altarr(DllInfo *dll)
