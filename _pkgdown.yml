@@ -1,0 +1,48 @@
+url: https://hypertidy.github.io/altarr/
+
+template:
+  bootstrap: 5
+
+navbar:
+  structure:
+    left: [intro, articles, reference, news]
+    right: [search, github]
+  components:
+    articles:
+      text: Articles
+      menu:
+      - text: Walkthrough
+        href: articles/walkthrough.html
+      - text: Writing a fetch function
+        href: articles/fetch.html
+      - text: -------
+      - text: "Post: an ALTREP with a dim and no class"
+        href: https://hypertidy.org/posts/2026-10-01_altrep-dim-no-class/
+
+reference:
+- title: Lazy arrays
+  contents:
+  - altarr
+  - is_altarr
+- title: Planned reads
+  contents:
+  - altarr_extract
+  - altarr_plan
+- title: Inspecting
+  contents:
+  - altarr_stats
+  - altarr_reset
+- title: The contract
+  contents:
+  - altarr_contract
+- title: Example and demonstration reader
+  contents:
+  - altarr_example_zarr
+  - altarr_zarr_v2
+
+articles:
+- title: Articles
+  navbar: ~
+  contents:
+  - walkthrough
+  - fetch

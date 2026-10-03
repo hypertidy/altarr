@@ -1,8 +1,8 @@
 ---
-title: "altarr walkthrough: what base R asks a lazy array for"
+title: "Walkthrough: what base R asks a lazy array for"
 output: rmarkdown::html_vignette
 vignette: >
-  %\VignetteIndexEntry{altarr walkthrough}
+  %\VignetteIndexEntry{Walkthrough: what base R asks a lazy array for}
   %\VignetteEngine{knitr::rmarkdown}
   %\VignetteEncoding{UTF-8}
 ---

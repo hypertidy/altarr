@@ -1,3 +1,10 @@
+# altarr (development version)
+
+* New vignette, `vignette("fetch", package = "altarr")`: writing a fetch
+  function, for maintainers of Zarr, netCDF, GDAL and object-store readers.
+* pkgdown site at <https://hypertidy.github.io/altarr/>, built by GitHub
+  Actions.
+
 # altarr 0.1.0
 
 First release-shaped version: the package is usable on its own, not only

@@ -29,10 +29,17 @@ z[100:200, 50:80, 1:12]                     # works, but chunk by chunk
 altarr_extract(z, 100:200, 50:80, 1:12)     # same answer, one planned batch
 ```
 
-To see it work step by step, read the vignette, `vignette("walkthrough",
-package = "altarr")`. For what a fetch function must guarantee, and which base
-R operations are planned, element by element or materializing, see
-`?altarr_contract`.
+Documentation is at <https://hypertidy.github.io/altarr/>:
+
+* [Walkthrough](https://hypertidy.github.io/altarr/articles/walkthrough.html)
+  (`vignette("walkthrough", package = "altarr")`): ten steps showing what base
+  R asks a lazy array for.
+* [Writing a fetch function](https://hypertidy.github.io/altarr/articles/fetch.html)
+  (`vignette("fetch", package = "altarr")`): for maintainers of Zarr, netCDF,
+  GDAL or object-store readers who want their arrays to behave as R arrays.
+* [The contract](https://hypertidy.github.io/altarr/reference/altarr_contract.html)
+  (`?altarr_contract`): what a fetch function must guarantee, and which base R
+  operations are planned, element by element or materializing.
 
 ```r
 # install.packages("remotes")
