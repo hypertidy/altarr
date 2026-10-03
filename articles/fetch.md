@@ -1,0 +1,407 @@
+# Writing a fetch function
+
+This guide is for people who maintain a reader (Zarr, netCDF, HDF5,
+GDAL, an object store, a database of chunk references) and want its
+arrays to behave as ordinary R arrays. The split of work is simple:
+
+- **altarr** owns indexing, chunk planning, batching, the cache,
+  materialization, serialization and type coercion.
+- **You** own one function: given a set of chunk coordinates, return
+  those chunks’ values.
+
+The full rules are in
+[`?altarr_contract`](https://hypertidy.github.io/altarr/reference/altarr_contract.md).
+This guide works through them with code you can run, then sketches real
+backends.
+
+``` r
+
+library(altarr)
+```
+
+## 1. The smallest fetch function
+
+A fetch function is called as `fetch(chunks)`. `chunks` is an integer
+matrix: one row per chunk, one column per dimension, 0-based chunk
+coordinates. It returns a list with one vector per row, each holding
+that chunk’s values in column-major order, clipped at the array edge.
+
+The easiest backend to reason about is an ordinary array in memory. It
+is also the reference you will test real backends against.
+
+``` r
+
+ref <- array(as.double(seq_len(10 * 7)), c(10, 7))
+cs <- c(4L, 3L)
+
+## the values of one chunk of 'a', given its 0-based chunk coordinates
+chunk_of <- function(a, cc, cs) {
+  start <- cc * cs + 1L
+  end <- pmin(start + cs - 1L, dim(a))   # clip at the edge
+  idx <- Map(seq, start, end)
+  as.vector(do.call(`[`, c(list(a), idx, list(drop = FALSE))))
+}
+
+fetch_mem <- function(chunks) {
+  lapply(seq_len(nrow(chunks)), function(r) chunk_of(ref, chunks[r, ], cs))
+}
+
+x <- altarr(dim(ref), cs, fetch_mem)
+x[cbind(c(1, 10), c(1, 7))]
+#> [1]  1 70
+identical(x[2:9, 3:6], ref[2:9, 3:6])
+#> [1] TRUE
+```
+
+`chunk_of()` is the only geometry you need. Every other backend in this
+guide is the same loop with a different way of getting one chunk’s
+values.
+
+## 2. Test against a reference
+
+altarr’s own tests compare every path with base R using
+[`identical()`](https://rdrr.io/r/base/identical.html). Do the same for
+your backend: read a small store both ways, once through your fetch
+function and once eagerly, and compare across the paths base R takes.
+
+``` r
+
+check_fetch <- function(x, ref) {
+  d <- dim(ref)
+  mid <- lapply(d, function(n) unique(c(1L, n %/% 2L, n)))  # corners and middle
+  pts <- as.matrix(expand.grid(mid))
+  c(
+    elt        = identical(x[[length(ref)]], ref[[length(ref)]]),
+    subset     = identical(x[c(1, length(ref), 3)], ref[c(1, length(ref), 3)]),
+    matrix_idx = identical(x[pts], ref[pts]),
+    rectangle  = identical(do.call(`[`, c(list(x), mid)),
+                           do.call(`[`, c(list(ref), mid))),
+    extract    = identical(do.call(altarr_extract, c(list(x), mid)),
+                           do.call(`[`, c(list(ref), mid))),
+    sum        = identical(sum(x), sum(ref)),
+    mean       = identical(mean(x), mean(ref)),
+    anyNA      = identical(anyNA(x), anyNA(ref))
+  )
+}
+check_fetch(x, ref)
+#>        elt     subset matrix_idx  rectangle    extract        sum       mean 
+#>       TRUE       TRUE       TRUE       TRUE       TRUE       TRUE       TRUE 
+#>      anyNA 
+#>       TRUE
+```
+
+Choose a reference with chunk counts that do not divide the dimensions
+evenly, so every test touches edge chunks. Most fetch bugs live there.
+
+[`sum()`](https://rdrr.io/r/base/sum.html) and
+[`mean()`](https://rdrr.io/r/base/mean.html) accumulate chunk by chunk,
+so on real floating-point data they can differ from base R in the last
+bits. Compare them with
+[`all.equal()`](https://rdrr.io/r/base/all.equal.html) unless your
+reference values are integers, as here.
+
+## 3. What altarr checks for you
+
+altarr checks what it can check cheaply, and its errors name the
+problem. A fetch that returns a padded edge chunk (as Zarr stores them)
+is stopped at the first edge chunk:
+
+``` r
+
+fetch_padded <- function(chunks) {
+  lapply(seq_len(nrow(chunks)), function(r) rep(0, prod(cs)))
+}
+altarr(dim(ref), cs, fetch_padded)[10, 7]
+#> Error:
+#> ! altarr: chunk 8 has length 12, expected 2 (edge chunks must be clipped, not padded)
+```
+
+So is a list of the wrong length, or a chunk of the wrong kind:
+
+``` r
+
+altarr(dim(ref), cs, function(chunks) list(1))[cbind(c(1, 10), c(1, 7))]
+#> Error:
+#> ! altarr: fetch() must return a list with one element per requested chunk (2 requested)
+altarr(dim(ref), cs, function(chunks) lapply(seq_len(nrow(chunks)), function(r) "a"))[1]
+#> Error:
+#> ! altarr: fetch() returned a chunk that is not numeric or logical
+```
+
+An error inside your fetch function surfaces as an ordinary R error from
+wherever the read happened, whether that was `[`,
+[`sum()`](https://rdrr.io/r/base/sum.html) or
+[`mean()`](https://rdrr.io/r/base/mean.html):
+
+``` r
+
+sum(altarr(dim(ref), cs, function(chunks) stop("store unreachable")))
+#> Error:
+#> ! store unreachable
+```
+
+What altarr cannot check is the values themselves: a chunk in the wrong
+order, or the wrong chunk, has the right length. That is what section 2
+is for.
+
+## 4. One call, many chunks
+
+altarr hands your fetch function as many chunks per call as it can plan.
+A fetch that logs `nrow(chunks)` shows how each base R operation arrives
+at your backend:
+
+``` r
+
+make_logged <- function(a, cs) {
+  force(a); force(cs)
+  calls <- integer(0)
+  fetch <- function(chunks) {
+    calls[[length(calls) + 1L]] <<- nrow(chunks)
+    lapply(seq_len(nrow(chunks)), function(r) chunk_of(a, chunks[r, ], cs))
+  }
+  list(fetch = fetch,
+       take = function() { out <- calls; calls <<- integer(0); out })
+}
+
+big <- array(as.double(seq_len(60 * 40 * 12)), c(60, 40, 12))
+lg <- make_logged(big, c(10L, 10L, 4L))   # 6 x 4 x 3 = 72 chunks
+y <- altarr(dim(big), c(10L, 10L, 4L), lg$fetch)
+
+ops <- list(
+  "y[1:5]"                = function() y[1:5],
+  "y[cbind(...)] 3 points" = function() y[cbind(c(1, 60, 30), c(1, 40, 20), c(1, 12, 6))],
+  "y[1:25, 1:25, 1]"      = function() y[1:25, 1:25, 1],
+  "altarr_extract(same)"  = function() altarr_extract(y, 1:25, 1:25, 1),
+  "sum(y)"                = function() sum(y),
+  "mean(y)"               = function() mean(y)
+)
+for (nm in names(ops)) {
+  altarr_reset(y)   # empty cache, so every operation starts cold
+  invisible(lg$take())
+  invisible(ops[[nm]]())
+  cat(sprintf("%-24s fetch calls: %-3d chunks per call: %s\n", nm,
+              length(cl <- lg$take()), paste(cl, collapse = " ")))
+}
+#> y[1:5]                   fetch calls: 1   chunks per call: 1
+#> y[cbind(...)] 3 points   fetch calls: 1   chunks per call: 3
+#> y[1:25, 1:25, 1]         fetch calls: 9   chunks per call: 1 1 1 1 1 1 1 1 1
+#> altarr_extract(same)     fetch calls: 1   chunks per call: 9
+#> sum(y)                   fetch calls: 2   chunks per call: 64 8
+#> mean(y)                  fetch calls: 3   chunks per call: 24 24 24
+```
+
+Matrix indexing and
+[`altarr_extract()`](https://hypertidy.github.io/altarr/reference/altarr_extract.md)
+arrive as one call. `x[i, j, k]` arrives one chunk per call, because
+base R asks for it element by element (the gap the base R proposal is
+about). [`sum()`](https://rdrr.io/r/base/sum.html),
+[`min()`](https://rdrr.io/r/base/Extremes.html),
+[`max()`](https://rdrr.io/r/base/Extremes.html) and materialization
+arrive in batches of `getOption("altarr.batch_chunks")` chunks.
+[`mean()`](https://rdrr.io/r/base/mean.html),
+[`prod()`](https://rdrr.io/r/base/prod.html) and
+[`anyNA()`](https://rdrr.io/r/base/NA.html) scan the array region by
+region, and altarr prefetches one layer at a time: all the chunks that
+share the last dimension’s chunk coordinate (here 6 x 4 = 24).
+
+So the most useful thing a backend can do is read the rows of one call
+**concurrently**. With 64 chunks per call against object storage, a
+serial loop pays 64 round trips; a concurrent one pays about one.
+
+``` r
+
+## sketch: read the chunks of one call in parallel
+fetch_parallel <- function(chunks) {
+  parallel::mclapply(seq_len(nrow(chunks)),
+                     function(r) read_one_chunk(chunks[r, ]),
+                     mc.cores = 8)
+}
+```
+
+Concurrency must stay inside fetch, and only R’s main thread may call
+the R API. Forked workers (`mclapply`), a multi-handle HTTP client
+(`curl`’s multi interface) or a C/C++/Rust library that reads on its own
+threads and returns plain buffers are all fine.
+
+## 5. Dimension order: reverse, never transpose
+
+Most stores are C-order (row-major) and list dimensions slowest first. R
+is column-major and lists dimensions fastest first. A C-order chunk of
+shape `(s1, s2, s3)` holds exactly the same bytes as a column-major
+chunk of shape `c(s3, s2, s1)`. So:
+
+- give altarr the reversed shape and reversed chunk shape;
+- reverse each row of `chunks` before you build the store’s chunk key;
+- never transpose a chunk.
+
+[`altarr_zarr_v2()`](https://hypertidy.github.io/altarr/reference/altarr_zarr_v2.md)
+does exactly this, and its source is a compact worked example:
+`body(altarr_zarr_v2)`. The result has R’s usual orientation for data
+that came from netCDF or Zarr. `x[lon, lat, time]` corresponds to the
+store’s `var[time, lat, lon]`, which is the same convention ncdf4 and
+RNetCDF use.
+
+## 6. Types, missing values and unpacking
+
+Pass `type = "double"`, `"integer"` or `"logical"` to
+[`altarr()`](https://hypertidy.github.io/altarr/reference/altarr.md).
+Return chunks of that type to avoid a copy; other numeric or logical
+vectors are coerced as
+[`as.integer()`](https://rdrr.io/r/base/integer.html) and friends would.
+
+Decoding belongs in fetch. altarr never sees bytes or encodings, so:
+
+- map fill values and `missing_value` to `NA` inside fetch;
+- apply `scale_factor` and `add_offset` inside fetch, and declare the
+  array `"double"`;
+- decompress, unshuffle and byte-swap inside fetch, or hand the bytes to
+  a library that does.
+
+64-bit integers have no R type. Return doubles (exact up to 2^53) and
+say so in your documentation.
+
+## 7. Recipes: what `saveRDS()` keeps
+
+[`saveRDS()`](https://rdrr.io/r/base/readRDS.html) on an altarr array
+writes the recipe (dim, chunk shape, type and the fetch function), never
+the values. The fetch function travels with its enclosing environment,
+so build it in a factory that keeps only what is needed to re-open the
+source, and [`force()`](https://rdrr.io/r/base/force.html) the
+arguments:
+
+``` r
+
+make_fetch_store <- function(path, dim, chunk) {
+  force(path); force(dim); force(chunk)
+  function(chunks) {
+    lapply(seq_len(nrow(chunks)), function(r) {
+      start <- chunks[r, ] * chunk + 1L
+      n <- pmin(chunk, dim - start + 1L)
+      rep(nchar(path), prod(n))   # stand-in for reading from 'path'
+    })
+  }
+}
+z <- altarr(c(400L, 300L), c(64L, 64L),
+            make_fetch_store("s3://bucket/array.zarr", c(400L, 300L), c(64L, 64L)))
+f <- tempfile(fileext = ".rds")
+saveRDS(z, f)
+file.size(f)   # bytes, for 120,000 values
+#> [1] 370
+```
+
+Two traps:
+
+- A fetch defined at top level refers to the global environment, which
+  is saved as a reference, not its contents. The recipe loads in a new
+  session, but reading fails with “object not found”. Section 1’s
+  `fetch_mem` is like this: fine in a session, useless saved.
+- Connection handles (external pointers: a GDAL dataset, a netCDF id, a
+  DBI connection) do not survive
+  [`saveRDS()`](https://rdrr.io/r/base/readRDS.html). Keep a path or URL
+  in the recipe and open the handle lazily, re-opening it when it is
+  gone:
+
+``` r
+
+make_fetch_handle <- function(path) {
+  force(path)
+  h <- NULL
+  function(chunks) {
+    if (is.null(h) || !handle_is_valid(h)) h <<- open_source(path)
+    lapply(seq_len(nrow(chunks)), function(r) read_chunk(h, chunks[r, ]))
+  }
+}
+```
+
+## 8. Sources must be pinned
+
+R assumes a vector never changes. altarr re-fetches chunks after cache
+eviction, and a recipe re-reads its source when loaded later. If the
+source can change underneath, the same element can have two values in
+one session. Point fetch at something immutable: an Icechunk snapshot
+id, a versioned object, a fixed set of chunk byte references (kerchunk,
+blocklist), or content-addressed chunks.
+
+## 9. Sketches for real backends
+
+These are not run here, because altarr does not depend on these
+packages. Each is the section 1 loop with a different `chunk_of()`.
+
+**ncdf4.** `ncvar_get()` already uses R’s dimension order and applies
+scale and offset, so there is no reversal and the array is double:
+
+``` r
+
+altarr_ncdf4 <- function(file, varname) {
+  force(file); force(varname)
+  nc <- ncdf4::nc_open(file)
+  v <- nc$var[[varname]]
+  d <- v$varsize
+  cs <- v$chunksizes
+  if (all(is.na(cs))) cs <- d                  # contiguous: one chunk
+  cs <- rev(cs)                                # chunksizes are in C order
+  ncdf4::nc_close(nc)
+  fetch <- function(chunks) {
+    nc <- ncdf4::nc_open(file)
+    on.exit(ncdf4::nc_close(nc))
+    lapply(seq_len(nrow(chunks)), function(r) {
+      start <- chunks[r, ] * cs + 1L
+      count <- pmin(cs, d - start + 1L)
+      as.vector(ncdf4::ncvar_get(nc, varname, start = start, count = count,
+                                 collapse_degen = FALSE))
+    })
+  }
+  altarr(d, cs, fetch)
+}
+```
+
+**gdalraster (classic raster).** GDAL reads a window left to right, top
+to bottom. As a column-major array that is `dim = c(ncol, nrow)`, which
+is the same reversal, so the GDAL block size is the chunk shape:
+
+``` r
+
+altarr_gdal <- function(dsn, band = 1L) {
+  force(dsn); force(band)
+  ds <- methods::new(gdalraster::GDALRaster, dsn)
+  d <- c(ds$getRasterXSize(), ds$getRasterYSize())
+  cs <- ds$getBlockSize(band)
+  ds$close()
+  h <- NULL
+  fetch <- function(chunks) {
+    if (is.null(h) || !h$isOpen()) h <<- methods::new(gdalraster::GDALRaster, dsn)
+    lapply(seq_len(nrow(chunks)), function(r) {
+      off <- chunks[r, ] * cs
+      n <- pmin(cs, d - off)
+      h$read(band, off[1], off[2], n[1], n[2], n[1], n[2])
+    })
+  }
+  altarr(d, cs, fetch)
+}
+```
+
+**Chunk byte references** (kerchunk, blocklist, Icechunk manifests). The
+recipe holds a reference table; fetch looks up each chunk’s
+`(url, offset, length)`, issues the range requests concurrently, and
+decodes. Reference tables are pinned by construction, which makes them
+the best fit for section 8.
+
+## 10. Tools while developing
+
+- `altarr_stats(x)`: counters for every path (element reads, planned
+  subsets, fetch calls, chunks fetched, materializations, evictions) and
+  the cache state. Use `altarr_reset(x)` between experiments.
+- `altarr_plan(x, i, j, k)`: the chunks a rectangular subscript touches,
+  as a data frame. It is useful for checking chunk keys by hand.
+- `options(altarr.max_materialize = 0)`: refuse all materialization, so
+  any operation that would read the whole array errors instead. Run your
+  workflow under it to find what materializes.
+- `options(altarr.cache_bytes = 0)`: chunks are evicted as soon as each
+  request is done, so every read goes to fetch. This is a stress test
+  for the backend.
+- `options(altarr.batch_chunks = n)`: match batch size to your backend’s
+  concurrency.
+
+Which base R operations are planned, element by element, or
+materializing is measured in
+[`?altarr_contract`](https://hypertidy.github.io/altarr/reference/altarr_contract.md).
