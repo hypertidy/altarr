@@ -436,8 +436,11 @@ options(old)
 
 ## a factory-built fetch with forced arguments survives a fresh R session
 rs <- file.path(R.home("bin"), "Rscript")
-if (nzchar(Sys.getenv("_R_CHECK_PACKAGE_NAME_")) || file.exists(rs)) {
-  ff <- tempfile(fileext = ".rds")
+if (nzchar(Sys.getenv("_R_CHECK_PACKAGE_NAME_")) || file.exists(rs) ||
+    file.exists(paste0(rs, ".exe"))) {
+  ## forward slashes: a Windows path pasted into R code would turn
+  ## "C:\Users" into a \U escape in the child session
+  ff <- normalizePath(tempfile(fileext = ".rds"), winslash = "/", mustWork = FALSE)
   make_fetch <- function(path, d, cs) {
     force(path); force(d); force(cs)
     function(ch) lapply(seq_len(nrow(ch)), function(r) {
@@ -447,7 +450,9 @@ if (nzchar(Sys.getenv("_R_CHECK_PACKAGE_NAME_")) || file.exists(rs)) {
   saveRDS(altarr(c(9L, 7L), c(4L, 4L), make_fetch("abc", c(9L, 7L), c(4L, 4L))), ff)
   out <- system2(rs, c("-e", shQuote(sprintf("cat(readRDS('%s')[9, 7])", ff))),
                  stdout = TRUE, stderr = TRUE)
-  stopifnot(identical(trimws(tail(out, 1)), "3"))
+  if (!identical(trimws(tail(out, 1)), "3")) {
+    stop("fresh session read failed:\n", paste(out, collapse = "\n"))
+  }
 }
 
 cat("all tests passed\n")
