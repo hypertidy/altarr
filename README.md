@@ -1,12 +1,20 @@
 # altarr
 
-What R does today with an ALTREP that has a `dim` and no class.
+<!-- badges: start -->
+[![R-CMD-check](https://github.com/hypertidy/altarr/actions/workflows/R-CMD-check.yaml/badge.svg)](https://github.com/hypertidy/altarr/actions/workflows/R-CMD-check.yaml)
+<!-- badges: end -->
+
+> **Start here:** [What R does today with an ALTREP that has a dim and no
+> class](https://hypertidy.org/posts/2026-10-01_altrep-dim-no-class/), on
+> hypertidy.org: the idea, the three paths through base R's subsetting code,
+> measurements, a real Zarr store, and the small hook R could add. A copy of
+> the post as published is kept in `inst/blog/`.
 
 `altarr` makes a lazily-read, chunked, remote array that is, as far as R is
 concerned, an ordinary double, integer or logical vector with a `dim`
-attribute. No class, no S4,
-no methods. Chunks come from a fetch function you supply, so the store behind
-it can be anything: object storage, Zarr, GDAL, a generator.
+attribute. No class, no S4, no methods. Chunks come from a fetch function you
+supply, so the store behind it can be anything: object storage, Zarr, GDAL, a
+generator.
 
 The point is to find out how far R's old and very rich array indexing can
 drive *planned* reads of remote encoded chunks without patching R, and to
@@ -19,6 +27,16 @@ dim(z)                                      # free: no data read
 z[cbind(lon_i, lat_i, time_i)]              # one planned batch of chunk reads
 z[100:200, 50:80, 1:12]                     # works, but chunk by chunk
 altarr_extract(z, 100:200, 50:80, 1:12)     # same answer, one planned batch
+```
+
+To see it work step by step, read the vignette, `vignette("walkthrough",
+package = "altarr")`. For what a fetch function must guarantee, and which base
+R operations are planned, element by element or materializing, see
+`?altarr_contract`.
+
+```r
+# install.packages("remotes")
+remotes::install_github("hypertidy/altarr", build_vignettes = TRUE)
 ```
 
 ## The three paths through base R
@@ -235,5 +253,7 @@ touching the ALTREP layer.
   printing what base R asked for at each step; uses `altarr_example_zarr()`,
   which writes a small store whose values are their own positions.
 - `inst/examples/three-paths.R`: the measurements above.
-- `inst/blog/2026-10-01_altrep-dim-no-class/`: the blog post (Quarto `index.qmd`
-  plus its figure), identical to the copy published on hypertidy.org.
+- `inst/blog/2026-10-01_altrep-dim-no-class/`: the blog post as published on
+  [hypertidy.org](https://hypertidy.org/posts/2026-10-01_altrep-dim-no-class/)
+  (Quarto `index.qmd` plus its figure), kept as a record; the live post may
+  since have been edited.

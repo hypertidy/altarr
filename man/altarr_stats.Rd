@@ -9,6 +9,9 @@ altarr_stats(x)
 \arguments{
 \item{x}{an altarr array}
 }
+\value{
+a named numeric vector of counters and cache state.
+}
 \description{
 \code{elt} counts per-element reads (the \code{x[i, j, k]} path), \code{extract_subset}
 counts planned subset calls (\code{x[i]}, \code{x[cbind(...)]}), \code{hyperslab} counts
@@ -24,4 +27,12 @@ its budget. Also reported: \code{cache_bytes} (bytes currently cached) and
 \code{cache_budget} (\code{getOption("altarr.cache_bytes")}, default 256 MiB).
 The cache is least recently used first, and shared by an array and
 its copies.
+}
+\examples{
+x <- altarr_zarr_v2(altarr_example_zarr())
+x[1:5]
+x[1:5]   # the second read comes from the cache
+altarr_stats(x)[c("extract_subset", "fetch_calls", "chunks_cached")]
+altarr_reset(x)
+altarr_stats(x)[c("fetch_calls", "chunks_cached")]
 }

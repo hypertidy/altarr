@@ -1,6 +1,6 @@
 Package: altarr
 Title: Lazy Chunked Arrays as ALTREP Vectors
-Version: 0.0.1
+Version: 0.1.0
 Authors@R: person("Michael", "Sumner", email = "mdsumner@gmail.com", role = c("aut", "cre"))
 Description: A prototype exploring how far base R array indexing can drive
     planned reads of remote, chunked, encoded arrays when the array is an
@@ -11,6 +11,8 @@ License: MIT + file LICENSE
 Encoding: UTF-8
 Depends: R (>= 3.6.0)
 Imports: stats
+Suggests: knitr, rmarkdown
+VignetteBuilder: knitr
 Config/roxygen2/version: 8.1.0
 URL: https://github.com/hypertidy/altarr
 BugReports: https://github.com/hypertidy/altarr/issues

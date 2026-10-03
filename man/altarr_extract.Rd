@@ -13,10 +13,20 @@ altarr_extract(x, ..., drop = TRUE)
 
 \item{drop}{as for \code{[}}
 }
+\value{
+an ordinary (not lazy) array or vector.
+}
 \description{
 Same semantics as \code{x[i, j, k, drop = drop]}, but the per-dimension
 subscripts are handed to the ALTREP object whole: the touched chunks are
 planned as a cartesian product and fetched in one call. This is what
 base R's ArraySubset could do if it offered its normalized subscripts to
 an ALTREP method.
+}
+\examples{
+x <- altarr_zarr_v2(altarr_example_zarr())
+r <- altarr_extract(x, 1:40, 1:20, 1:3)
+dim(r)
+identical(r, x[1:40, 1:20, 1:3])
+altarr_extract(x, 1, 1:3, 1)   # dropped to a vector, as `[` would
 }

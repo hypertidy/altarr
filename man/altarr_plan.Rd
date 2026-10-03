@@ -11,8 +11,16 @@ altarr_plan(x, ...)
 
 \item{...}{one subscript per dimension (missing means all)}
 }
+\value{
+a data frame, one row per chunk.
+}
 \description{
 One row per chunk that \code{x[i, j, k]} would touch: 0-based chunk
 coordinates, plus each chunk's 1-based start and its extent along every
 dimension. The plan is a table; the array is what assembling it gives.
+}
+\examples{
+x <- altarr_zarr_v2(altarr_example_zarr())
+altarr_plan(x, 1:40, 1:20, 1:3)
+altarr_plan(x, 70, , 1)   # a missing subscript means the whole dimension
 }
