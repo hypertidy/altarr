@@ -15,6 +15,25 @@
 #' @param dimnames optional dimnames.
 #' @param type the array's type: `"double"`, `"integer"` or `"logical"`.
 #' @return a lazy array.
+#' @examples
+#' ## a 10 x 7 array in 4 x 3 chunks; each value is its own position
+#' d <- c(10L, 7L); cs <- c(4L, 3L)
+#' fetch <- function(chunks) {
+#'   lapply(seq_len(nrow(chunks)), function(r) {
+#'     start <- chunks[r, ] * cs + 1L
+#'     end <- pmin(start + cs - 1L, d)   # clipped at the edge
+#'     i <- start[1]:end[1]; j <- start[2]:end[2]
+#'     as.vector(outer(i, (j - 1) * d[1], "+"))
+#'   })
+#' }
+#' x <- altarr(d, cs, fetch)
+#' x[c(1, 70)]
+#' x[cbind(10, 7)]
+#' altarr_stats(x)[c("fetch_calls", "chunks_fetched")]
+#' ## the same chunks as an integer array (values are coerced)
+#' xi <- altarr(d, cs, fetch, type = "integer")
+#' typeof(xi)
+#' sum(xi)
 #' @export
 altarr <- function(dim, chunk, fetch, dimnames = NULL,
                    type = c("double", "integer", "logical")) {
@@ -29,6 +48,12 @@ altarr <- function(dim, chunk, fetch, dimnames = NULL,
 
 #' Is this a (still lazy-capable) altarr array?
 #' @param x object
+#' @return `TRUE` if `x` is an altarr array, or R's wrapper around one.
+#' @examples
+#' x <- altarr_zarr_v2(altarr_example_zarr())
+#' is_altarr(x)
+#' is_altarr(x[1:3])   # a subset is an ordinary vector
+#' is_altarr(array(1:4, c(2, 2)))
 #' @export
 is_altarr <- function(x) .Call(C_altarr_is, x)
 
@@ -49,12 +74,28 @@ is_altarr <- function(x) .Call(C_altarr_is, x)
 #' The cache is least recently used first, and shared by an array and
 #' its copies.
 #' @param x an altarr array
+#' @return a named numeric vector of counters and cache state.
+#' @examples
+#' x <- altarr_zarr_v2(altarr_example_zarr())
+#' x[1:5]
+#' x[1:5]   # the second read comes from the cache
+#' altarr_stats(x)[c("extract_subset", "fetch_calls", "chunks_cached")]
+#' altarr_reset(x)
+#' altarr_stats(x)[c("fetch_calls", "chunks_cached")]
 #' @export
 altarr_stats <- function(x) .Call(C_altarr_info, x)
 
 #' Reset counters, and optionally drop the chunk cache
 #' @param x an altarr array
 #' @param cache drop cached chunks too?
+#' @return `x`, invisibly.
+#' @examples
+#' x <- altarr_zarr_v2(altarr_example_zarr())
+#' x[1:5]
+#' x[1:5]   # the second read comes from the cache
+#' altarr_stats(x)[c("extract_subset", "fetch_calls", "chunks_cached")]
+#' altarr_reset(x)
+#' altarr_stats(x)[c("fetch_calls", "chunks_cached")]
 #' @export
 altarr_reset <- function(x, cache = TRUE) {
   invisible(.Call(C_altarr_reset, x, cache))
@@ -98,6 +139,13 @@ altarr_reset <- function(x, cache = TRUE) {
 #' @param x an altarr array
 #' @param ... one subscript per dimension (missing means all)
 #' @param drop as for `[`
+#' @return an ordinary (not lazy) array or vector.
+#' @examples
+#' x <- altarr_zarr_v2(altarr_example_zarr())
+#' r <- altarr_extract(x, 1:40, 1:20, 1:3)
+#' dim(r)
+#' identical(r, x[1:40, 1:20, 1:3])
+#' altarr_extract(x, 1, 1:3, 1)   # dropped to a vector, as `[` would
 #' @export
 altarr_extract <- function(x, ..., drop = TRUE) {
   subs <- .norm_subs(x, as.list(substitute(list(...)))[-1L], parent.frame())
@@ -122,6 +170,11 @@ altarr_extract <- function(x, ..., drop = TRUE) {
 #' dimension. The plan is a table; the array is what assembling it gives.
 #'
 #' @inheritParams altarr_extract
+#' @return a data frame, one row per chunk.
+#' @examples
+#' x <- altarr_zarr_v2(altarr_example_zarr())
+#' altarr_plan(x, 1:40, 1:20, 1:3)
+#' altarr_plan(x, 70, , 1)   # a missing subscript means the whole dimension
 #' @export
 altarr_plan <- function(x, ...) {
   subs <- .norm_subs(x, as.list(substitute(list(...)))[-1L], parent.frame())

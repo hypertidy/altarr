@@ -21,6 +21,10 @@ store fits behind the fetch contract in a few lines. Handles Zarr v2
 arrays with dtype \verb{<f8}, \verb{<f4}, \verb{<i4}, \verb{<i2}, \verb{|i1}, \verb{<u2}, \verb{|u1} or
 \verb{|b1}, compressor \code{null} or \code{zlib}, order \code{C} or \code{F}, and missing chunk
 files (read as \code{fill_value}). Zarr's padded edge chunks are clipped.
+
+This is a demonstration, not a Zarr implementation: no Zarr v3, no
+remote stores, no other codecs. For real stores, use a full Zarr reader
+and hand its chunk reads to \code{\link[=altarr]{altarr()}} as the fetch function.
 }
 \details{
 The array's type follows the dtype: floats give a double array, integers
@@ -34,4 +38,11 @@ missing.
 A C-order Zarr array of shape \verb{(s1, ..., sn)} is returned with R \code{dim}
 \code{c(sn, ..., s1)}: C-order bytes are already column-major for the
 reversed shape, so no transposition is ever done.
+}
+\examples{
+path <- altarr_example_zarr()
+x <- altarr_zarr_v2(path)
+dim(x)   # the Zarr shape, reversed
+x[cbind(70, 50, 30)]
+str(x)
 }

@@ -11,6 +11,17 @@ altarr_reset(x, cache = TRUE)
 
 \item{cache}{drop cached chunks too?}
 }
+\value{
+\code{x}, invisibly.
+}
 \description{
 Reset counters, and optionally drop the chunk cache
+}
+\examples{
+x <- altarr_zarr_v2(altarr_example_zarr())
+x[1:5]
+x[1:5]   # the second read comes from the cache
+altarr_stats(x)[c("extract_subset", "fetch_calls", "chunks_cached")]
+altarr_reset(x)
+altarr_stats(x)[c("fetch_calls", "chunks_cached")]
 }

@@ -36,3 +36,23 @@ Returns an ordinary double, integer or logical vector with a \code{dim}
 attribute and no class. It is an ALTREP object: values are obtained chunk
 by chunk from \code{fetch} only when base R asks for them.
 }
+\examples{
+## a 10 x 7 array in 4 x 3 chunks; each value is its own position
+d <- c(10L, 7L); cs <- c(4L, 3L)
+fetch <- function(chunks) {
+  lapply(seq_len(nrow(chunks)), function(r) {
+    start <- chunks[r, ] * cs + 1L
+    end <- pmin(start + cs - 1L, d)   # clipped at the edge
+    i <- start[1]:end[1]; j <- start[2]:end[2]
+    as.vector(outer(i, (j - 1) * d[1], "+"))
+  })
+}
+x <- altarr(d, cs, fetch)
+x[c(1, 70)]
+x[cbind(10, 7)]
+altarr_stats(x)[c("fetch_calls", "chunks_fetched")]
+## the same chunks as an integer array (values are coerced)
+xi <- altarr(d, cs, fetch, type = "integer")
+typeof(xi)
+sum(xi)
+}

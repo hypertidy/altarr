@@ -9,6 +9,15 @@ is_altarr(x)
 \arguments{
 \item{x}{object}
 }
+\value{
+\code{TRUE} if \code{x} is an altarr array, or R's wrapper around one.
+}
 \description{
 Is this a (still lazy-capable) altarr array?
+}
+\examples{
+x <- altarr_zarr_v2(altarr_example_zarr())
+is_altarr(x)
+is_altarr(x[1:3])   # a subset is an ordinary vector
+is_altarr(array(1:4, c(2, 2)))
 }
