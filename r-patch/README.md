@@ -1,18 +1,24 @@
 # The proposed R patch: an ALTREP array-subset method
 
-`0001-ALTREP-Extract_array_subset.patch` adds one optional ALTREP method to
-R, `Extract_array_subset`. When R evaluates `x[i, j, ...]` on an ALTREP
-array, `MatrixSubset()` and `ArraySubset()` in `src/main/subset.c` first
-offer the method the subscripts they have already normalized (one 1-based
-integer vector per dimension, `NA` allowed). A class backed by chunked or
-remote storage can then plan one read instead of answering one element at a
-time. If the method returns `NULL`, or the class has none, R extracts
-element by element exactly as before.
+The patch adds one optional ALTREP method to R, `Extract_array_subset`.
+When R evaluates `x[i, j, ...]` on an ALTREP array, `MatrixSubset()` and
+`ArraySubset()` in `src/main/subset.c` first offer the method the subscripts
+they have already normalized (one 1-based integer vector per dimension, `NA`
+allowed). A class backed by chunked or remote storage can then plan one read
+instead of answering one element at a time. If the method returns `NULL`, or
+the class has none, R extracts element by element exactly as before.
 
-The patch is against R-devel svn r90638 (2026-10-03), git mirror commit
-`d75f6a2224865f9ac0bee065de99af817a3a65e6` of
-<https://github.com/wch/r-source>. It touches 6 files and adds about 100
-lines.
+**The patch itself lives in
+[mdsumner/r-variants](https://github.com/mdsumner/r-variants), as the
+[`array-subset` variant](https://github.com/mdsumner/r-variants/tree/main/variants/array-subset).**
+r-variants keeps it applying to current R-devel (checked weekly), builds R
+with it on demand, runs altarr's tests and `demo.R` against the build, and
+publishes the result as a container image. It was first written against
+R-devel svn r90638 (2026-10-03). It touches 6 files and adds about 100
+lines, including a NEWS entry.
+
+This directory keeps the altarr side: `demo.R`, which r-variants runs as
+part of its tests, and the notes below.
 
 ## What R keeps doing
 
@@ -56,8 +62,8 @@ R's element loop gives the right answer.
 ## Checked
 
 * `make check` on the patched R-devel passes. The internet and Latin-1
-  locale tests fail without network or that locale, as R expects. See
-  the `r-hook` workflow for a clean run.
+  locale tests fail without network or that locale, as R expects. The
+  r-variants `build` workflow can run it on demand (`make_check: true`).
 * altarr's test suite passes on stock R and on patched R-devel. On patched
   R it adds tests for rectangles, `drop`, `NA`, negative, logical and
   character subscripts, zero extents, out-of-bounds errors, dimnames,
@@ -80,22 +86,22 @@ x 60 array in 100 x 100 x 10 chunks:
 The chunks fetched are the same in both columns. The difference is round
 trips, which on object storage is most of the time.
 
-## Build it yourself
+## Try it
 
 ```sh
-git clone https://github.com/wch/r-source.git r-devel
-cd r-devel
-git checkout d75f6a2224865f9ac0bee065de99af817a3a65e6   # or try current trunk
-git am /path/to/altarr/r-patch/0001-ALTREP-Extract_array_subset.patch
-# the git mirror has no svn metadata; the build needs a revision stamp
-printf 'Revision: 90638\nLast Changed Date: 2026-10-03\n' > SVNINFO
-mkdir ../r-build && cd ../r-build
-../r-devel/configure --without-recommended-packages --disable-java --without-x
-make -j4
-bin/R CMD INSTALL /path/to/altarr           # altarr:::has_array_subset() is TRUE
-bin/Rscript /path/to/altarr/r-patch/demo.R
+docker run --rm -it ghcr.io/mdsumner/r-variants:array-subset
 ```
 
-Build dependencies on Debian/Ubuntu: `build-essential gfortran
-libreadline-dev libx11-dev libpcre2-dev liblzma-dev libbz2-dev zlib1g-dev
-libicu-dev libcurl4-openssl-dev`.
+```r
+install.packages("remotes")
+remotes::install_github("hypertidy/altarr@exp/r-hook")
+altarr:::has_array_subset()     # TRUE
+```
+
+The `r-hook` workflow in this repository does the same on every push to
+`exp/r-hook`: it runs altarr's tests and `demo.R` inside that image, so no
+R build is needed here.
+
+To build patched R yourself, with or without Docker, see the
+[r-variants README](https://github.com/mdsumner/r-variants#readme).
+`scripts/build-r.sh` there is the whole build.

@@ -1,5 +1,6 @@
-# Build R-devel with the proposed ALTREP Extract_array_subset patch
-# (r-patch/), run R's own checks, then altarr's tests and demo on it.
+# altarr on R-devel with the proposed ALTREP Extract_array_subset method.
+# The patched R comes ready-built from mdsumner/r-variants (the
+# array-subset variant), so this only installs altarr and tests it.
 on:
   push:
     branches: ['exp/r-hook']
@@ -13,47 +14,20 @@ permissions: read-all
 jobs:
   r-hook:
     runs-on: ubuntu-latest
-    env:
-      R_SOURCE_COMMIT: d75f6a2224865f9ac0bee065de99af817a3a65e6
-      R_SVN_REVISION: '90638'
-      R_SVN_DATE: '2026-10-03'
+    container: ghcr.io/mdsumner/r-variants:array-subset
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: altarr
 
-      - name: Build dependencies
+      - name: Which R
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential gfortran libreadline-dev \
-            libx11-dev libpcre2-dev liblzma-dev libbz2-dev zlib1g-dev \
-            libicu-dev libcurl4-openssl-dev
+          cat /opt/R/variant/VARIANT.txt
+          /opt/R/variant/bin/R --version | head -n1
 
-      - name: R-devel source at the pinned commit, with the patch
+      - name: Install altarr
+        run: /opt/R/variant/bin/R CMD INSTALL .
+
+      - name: Tests and demo on patched R
         run: |
-          git init -q r-devel && cd r-devel
-          git remote add origin https://github.com/wch/r-source.git
-          git fetch -q --depth 1 origin "$R_SOURCE_COMMIT"
-          git checkout -q FETCH_HEAD
-          git -c user.name=ci -c user.email=ci@example.com am \
-            ../altarr/r-patch/0001-ALTREP-Extract_array_subset.patch
-          printf 'Revision: %s\nLast Changed Date: %s\n' \
-            "$R_SVN_REVISION" "$R_SVN_DATE" > SVNINFO
-
-      - name: Build R
-        run: |
-          mkdir r-build && cd r-build
-          ../r-devel/configure --without-recommended-packages \
-            --disable-java --without-x
-          make -j"$(nproc)"
-
-      - name: R's own checks
-        run: cd r-build && make check
-
-      - name: altarr tests and demo on patched R
-        run: |
-          mkdir lib
-          r-build/bin/R CMD INSTALL -l lib altarr
-          R_LIBS=lib r-build/bin/Rscript -e 'stopifnot(altarr:::has_array_subset())'
-          R_LIBS=lib r-build/bin/Rscript altarr/tests/test-altarr.R
-          R_LIBS=lib r-build/bin/Rscript altarr/r-patch/demo.R
+          /opt/R/variant/bin/Rscript -e 'stopifnot(altarr:::has_array_subset())'
+          /opt/R/variant/bin/Rscript tests/test-altarr.R
+          /opt/R/variant/bin/Rscript r-patch/demo.R
