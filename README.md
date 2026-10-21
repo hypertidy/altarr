@@ -99,6 +99,16 @@ That mirrors how `ExtractSubset` already consults `ALTVEC_EXTRACT_SUBSET`. It
 is general (any lazy array package benefits: arrow, gdalraster, Zarr readers),
 adds no data model, and returning `NULL` keeps today's behaviour.
 
+That patch now exists, as `Extract_array_subset`. It lives in
+[mdsumner/r-variants](https://github.com/mdsumner/r-variants), as the
+[`array-subset` variant](https://github.com/mdsumner/r-variants/tree/main/variants/array-subset),
+which keeps it applying to current R-devel, builds R with it and runs
+altarr's tests against that build. altarr's side of it, the method
+implemented behind `#ifdef R_ALTREP_HAS_EXTRACT_ARRAY_SUBSET`, is on the
+[`exp/r-hook`](https://github.com/hypertidy/altarr/tree/exp/r-hook) branch,
+with design notes and measurements in
+[`r-patch/README.md`](https://github.com/hypertidy/altarr/blob/exp/r-hook/r-patch/README.md).
+
 ## What else comes for free
 
 - `dim()`, `length()`, `str()`: no reads.
@@ -248,6 +258,25 @@ itself is C, so the prototype keeps that layer in plain C with no
 dependencies. The fetch side is where Rust (object_store, async-tiff,
 codecs) earns its place, and it plugs in behind the fetch contract without
 touching the ALTREP layer.
+
+## Related
+
+Packages that supply a fetch function and so hand back altarr arrays:
+
+- [zaro](https://github.com/hypertidy/zaro): `zaro_array()` opens a Zarr
+  V2 or V3 array (S3, GCS, HTTP, local, Kerchunk references) as a lazy R
+  array.
+- [GDAL7](https://github.com/rgdal-dev/GDAL7): `as_altarr()` makes a GDAL
+  multidimensional array, a raster band or an overview lazy, one GDAL read
+  per batch of chunks.
+- [ndr](https://github.com/mdsumner/ndr): named-dimension arrays whose
+  `Variable` data can be an altarr array; `open_dataset()` reads through
+  GDAL7 and keeps the data lazy through `isel()`, `sel()` and reductions.
+
+And the R side:
+
+- [mdsumner/r-variants](https://github.com/mdsumner/r-variants): builds of
+  R-devel with proposed patches, including the `array-subset` variant above.
 
 ## Files
 
