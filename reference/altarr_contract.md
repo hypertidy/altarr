@@ -159,5 +159,5 @@ x[cbind(c(1, 40), c(1, 30))]
 f <- tempfile(fileext = ".rds")
 saveRDS(x, f)
 file.size(f)   # a few hundred bytes
-#> [1] 117031
+#> [1] 117034
 ```

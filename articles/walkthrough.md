@@ -242,7 +242,7 @@ chunk `x3` itself read. The cache is bounded: see
 f <- tempfile(fileext = ".rds")
 saveRDS(x3, f)
 file.size(f)   # the path, shape and chunking, not 105,000 values
-#> [1] 4943
+#> [1] 4941
 x4 <- readRDS(f)
 x4[pts]
 #> [1] 104999  50714 101500

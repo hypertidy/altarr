@@ -221,6 +221,7 @@
 <span id="cb3-6"><a href="#cb3-6" tabindex="-1"></a><span class="op">}</span></span>
 <span id="cb3-7"><a href="#cb3-7" tabindex="-1"></a><span class="co">/* otherwise fall through to the element loop, as today */</span></span></code></pre></div>
 <p>That mirrors how <code>ExtractSubset</code> already consults <code>ALTVEC_EXTRACT_SUBSET</code>. It is general (any lazy array package benefits: arrow, gdalraster, Zarr readers), adds no data model, and returning <code>NULL</code> keeps today’s behaviour.</p>
+<p>That patch now exists, as <code>Extract_array_subset</code>. It lives in <a href="https://github.com/mdsumner/r-variants" class="external-link">mdsumner/r-variants</a>, as the <a href="https://github.com/mdsumner/r-variants/tree/main/variants/array-subset" class="external-link"><code>array-subset</code> variant</a>, which keeps it applying to current R-devel, builds R with it and runs altarr’s tests against that build. altarr’s side of it, the method implemented behind <code>#ifdef R_ALTREP_HAS_EXTRACT_ARRAY_SUBSET</code>, is on the <a href="https://github.com/hypertidy/altarr/tree/exp/r-hook" class="external-link"><code>exp/r-hook</code></a> branch, with design notes and measurements in <a href="https://github.com/hypertidy/altarr/blob/exp/r-hook/r-patch/README.md" class="external-link"><code>r-patch/README.md</code></a>.</p>
 </div>
 <div class="section level2">
 <h2 id="what-else-comes-for-free">What else comes for free<a class="anchor" aria-label="anchor" href="#what-else-comes-for-free"></a>
@@ -349,6 +350,24 @@
 <h2 id="why-c-here">Why C here<a class="anchor" aria-label="anchor" href="#why-c-here"></a>
 </h2>
 <p>The ALTREP surface is the part that would face R core, and any change to R itself is C, so the prototype keeps that layer in plain C with no dependencies. The fetch side is where Rust (object_store, async-tiff, codecs) earns its place, and it plugs in behind the fetch contract without touching the ALTREP layer.</p>
+</div>
+<div class="section level2">
+<h2 id="related">Related<a class="anchor" aria-label="anchor" href="#related"></a>
+</h2>
+<p>Packages that supply a fetch function and so hand back altarr arrays:</p>
+<ul>
+<li>
+<a href="https://github.com/hypertidy/zaro" class="external-link">zaro</a>: <code>zaro_array()</code> opens a Zarr V2 or V3 array (S3, GCS, HTTP, local, Kerchunk references) as a lazy R array.</li>
+<li>
+<a href="https://github.com/rgdal-dev/GDAL7" class="external-link">GDAL7</a>: <code>as_altarr()</code> makes a GDAL multidimensional array, a raster band or an overview lazy, one GDAL read per batch of chunks.</li>
+<li>
+<a href="https://github.com/mdsumner/ndr" class="external-link">ndr</a>: named-dimension arrays whose <code>Variable</code> data can be an altarr array; <code>open_dataset()</code> reads through GDAL7 and keeps the data lazy through <code>isel()</code>, <code>sel()</code> and reductions.</li>
+</ul>
+<p>And the R side:</p>
+<ul>
+<li>
+<a href="https://github.com/mdsumner/r-variants" class="external-link">mdsumner/r-variants</a>: builds of R-devel with proposed patches, including the <code>array-subset</code> variant above.</li>
+</ul>
 </div>
 <div class="section level2">
 <h2 id="files">Files<a class="anchor" aria-label="anchor" href="#files"></a>

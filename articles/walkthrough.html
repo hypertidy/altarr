@@ -301,7 +301,7 @@ in <code><a href="../reference/altarr_stats.html">altarr_stats()</a></code>.</p>
 <code class="sourceCode R"><span><span class="va">f</span> <span class="op">&lt;-</span> <span class="fu"><a href="https://rdrr.io/r/base/tempfile.html" class="external-link">tempfile</a></span><span class="op">(</span>fileext <span class="op">=</span> <span class="st">".rds"</span><span class="op">)</span></span>
 <span><span class="fu"><a href="https://rdrr.io/r/base/readRDS.html" class="external-link">saveRDS</a></span><span class="op">(</span><span class="va">x3</span>, <span class="va">f</span><span class="op">)</span></span>
 <span><span class="fu"><a href="https://rdrr.io/r/base/file.info.html" class="external-link">file.size</a></span><span class="op">(</span><span class="va">f</span><span class="op">)</span>   <span class="co"># the path, shape and chunking, not 105,000 values</span></span>
-<span><span class="co">#&gt; [1] 4943</span></span>
+<span><span class="co">#&gt; [1] 4941</span></span>
 <span><span class="va">x4</span> <span class="op">&lt;-</span> <span class="fu"><a href="https://rdrr.io/r/base/readRDS.html" class="external-link">readRDS</a></span><span class="op">(</span><span class="va">f</span><span class="op">)</span></span>
 <span><span class="va">x4</span><span class="op">[</span><span class="va">pts</span><span class="op">]</span></span>
 <span><span class="co">#&gt; [1] 104999  50714 101500</span></span></code></pre></div>
