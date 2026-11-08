@@ -11,8 +11,8 @@
 <script src="deps/bootstrap-5.3.8/bootstrap.bundle.min.js"></script><link href="deps/font-awesome-6.5.2/css/all.min.css" rel="stylesheet">
 <link href="deps/font-awesome-6.5.2/css/v4-shims.min.css" rel="stylesheet">
 <script src="deps/headroom-0.11.0/headroom.min.js"></script><script src="deps/headroom-0.11.0/jQuery.headroom.min.js"></script><script src="deps/bootstrap-toc-1.0.1/bootstrap-toc.min.js"></script><script src="deps/clipboard.js-2.0.11/clipboard.min.js"></script><script src="deps/search-1.0.0/autocomplete.jquery.min.js"></script><script src="deps/search-1.0.0/fuse.min.js"></script><script src="deps/search-1.0.0/mark.min.js"></script><!-- pkgdown --><script src="pkgdown.js"></script><meta property="og:title" content="Lazy Chunked Arrays as ALTREP Vectors">
-<meta name="description" content="A prototype exploring how far base R array indexing can drive planned reads of remote, chunked, encoded arrays when the array is an ALTREP vector with a dim attribute and no class. Chunks come from a user-supplied fetch function, so any store (object storage, Zarr, GDAL) can sit behind it.">
-<meta property="og:description" content="A prototype exploring how far base R array indexing can drive planned reads of remote, chunked, encoded arrays when the array is an ALTREP vector with a dim attribute and no class. Chunks come from a user-supplied fetch function, so any store (object storage, Zarr, GDAL) can sit behind it.">
+<meta name="description" content="Lazy chunked arrays for R, as ALTREP vectors with a dim attribute and no class. Chunks come from a user-supplied fetch function, so any store (object storage, Zarr, GDAL) can sit behind them. Base R indexing, x[i] and x[cbind(i, j, k)], and reductions such as sum() and mean() become planned, batched reads of only the chunks they need, with a bounded chunk cache. altarr_extract() gives the same for rectangular regions.">
+<meta property="og:description" content="Lazy chunked arrays for R, as ALTREP vectors with a dim attribute and no class. Chunks come from a user-supplied fetch function, so any store (object storage, Zarr, GDAL) can sit behind them. Base R indexing, x[i] and x[cbind(i, j, k)], and reductions such as sum() and mean() become planned, batched reads of only the chunks they need, with a bounded chunk cache. altarr_extract() gives the same for rectangular regions.">
 </head>
 <body>
     <a href="#main" class="visually-hidden-focusable">Skip to contents</a>
@@ -22,7 +22,7 @@
 
     <a class="navbar-brand me-2" href="index.html">altarr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.0.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -61,7 +61,7 @@
 <!-- badges: start -->
 
 <blockquote>
-<p><strong>Start here:</strong> <a href="https://hypertidy.org/posts/2026-10-01_altrep-dim-no-class/" class="external-link">What R does today with an ALTREP that has a dim and no class</a>, on hypertidy.org: the idea, the three paths through base R’s subsetting code, measurements, a real Zarr store, and the small hook R could add. A copy of the post as published is kept in <code>inst/blog/</code>.</p>
+<p><strong>Start here:</strong> <a href="https://hypertidy.org/posts/2026-10-01_altrep-dim-no-class/" class="external-link">What R does today with an ALTREP that has a dim and no class</a>, on hypertidy.org: the idea, the three paths through base R’s subsetting code, measurements, a real Zarr store, and the small hook R could add. A copy of the post as published is kept in the repository at <code>inst/blog/</code>.</p>
 </blockquote>
 <p><code>altarr</code> makes a lazily-read, chunked, remote array that is, as far as R is concerned, an ordinary double, integer or logical vector with a <code>dim</code> attribute. No class, no S4, no methods. Chunks come from a fetch function you supply, so the store behind it can be anything: object storage, Zarr, GDAL, a generator.</p>
 <p>The point is to find out how far R’s old and very rich array indexing can drive <em>planned</em> reads of remote encoded chunks without patching R, and to pin down exactly what small change to R would close the gap.</p>
