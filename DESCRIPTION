@@ -8,8 +8,7 @@ Description: Lazy chunked arrays for R, as ALTREP vectors with a 'dim'
     R indexing, x[i] and x[cbind(i, j, k)], and reductions such as sum() and
     mean() become planned, batched reads of only the chunks they need, with
     a bounded chunk cache. altarr_extract() gives the same for rectangular
-    regions, which base R's x[i, j, k] does not yet offer to ALTREP
-    classes.
+    regions. 
 License: MIT + file LICENSE
 Encoding: UTF-8
 Depends: R (>= 3.6.0)
