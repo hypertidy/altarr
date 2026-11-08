@@ -304,7 +304,7 @@ Packages that supply a fetch function and so hand back altarr arrays:
 - [GDAL7](https://github.com/rgdal-dev/GDAL7): `as_altarr()` makes a
   GDAL multidimensional array, a raster band or an overview lazy, one
   GDAL read per batch of chunks.
-- [ndr](https://github.com/mdsumner/ndr): named-dimension arrays whose
+- [ndr](https://github.com/hypertidy/ndr): named-dimension arrays whose
   `Variable` data can be an altarr array; `open_dataset()` reads through
   GDAL7 and keeps the data lazy through `isel()`, `sel()` and
   reductions.
