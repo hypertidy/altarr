@@ -8,7 +8,7 @@
 > class](https://hypertidy.org/posts/2026-10-01_altrep-dim-no-class/), on
 > hypertidy.org: the idea, the three paths through base R's subsetting code,
 > measurements, a real Zarr store, and the small hook R could add. A copy of
-> the post as published is kept in `inst/blog/`.
+> the post as published is kept in the repository at `inst/blog/`.
 
 `altarr` makes a lazily-read, chunked, remote array that is, as far as R is
 concerned, an ordinary double, integer or logical vector with a `dim`

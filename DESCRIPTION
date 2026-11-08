@@ -1,12 +1,15 @@
 Package: altarr
 Title: Lazy Chunked Arrays as ALTREP Vectors
-Version: 0.1.0.9000
+Version: 0.1.1
 Authors@R: person("Michael", "Sumner", email = "mdsumner@gmail.com", role = c("aut", "cre"))
-Description: A prototype exploring how far base R array indexing can drive
-    planned reads of remote, chunked, encoded arrays when the array is an
-    ALTREP vector with a 'dim' attribute and no class. Chunks come from a
-    user-supplied fetch function, so any store (object storage, 'Zarr',
-    'GDAL') can sit behind it.
+Description: Lazy chunked arrays for R, as ALTREP vectors with a 'dim'
+    attribute and no class. Chunks come from a user-supplied fetch function,
+    so any store (object storage, 'Zarr', 'GDAL') can sit behind them. Base
+    R indexing, x[i] and x[cbind(i, j, k)], and reductions such as sum() and
+    mean() become planned, batched reads of only the chunks they need, with
+    a bounded chunk cache. altarr_extract() gives the same for rectangular
+    regions, which base R's x[i, j, k] does not yet offer to ALTREP
+    classes.
 License: MIT + file LICENSE
 Encoding: UTF-8
 Depends: R (>= 3.6.0)

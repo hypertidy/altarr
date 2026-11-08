@@ -1,4 +1,11 @@
-# altarr (development version)
+# altarr 0.1.1
+
+First CRAN submission.
+
+* The Description says what the package does now (lazy chunked arrays used
+  by ndr, zaro and GDAL7) rather than describing a prototype.
+* The blog post copy in `inst/blog/` stays in the repository but is no
+  longer installed with the package.
 
 * New vignette, `vignette("fetch", package = "altarr")`: writing a fetch
   function, for maintainers of Zarr, netCDF, GDAL and object-store readers.
