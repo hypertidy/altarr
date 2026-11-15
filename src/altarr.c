@@ -49,10 +49,12 @@ static R_altrep_class_t altarr_real_class, altarr_int_class, altarr_lgl_class;
 
 /* data1: shared spec (shared by duplicates, so the cache is shared too) */
 enum { S_DIM, S_CHUNK, S_FETCH, S_NCHUNK, S_CACHE, S_STATS, S_TICK, S_STATE,
-       S_TYPE, S_LEN };
+       S_TYPE, S_STORE, S_LEN };
 /* S_TICK: per chunk, the clock value when it was last used (for LRU)
    S_STATE: c(clock, bytes currently cached, end of the last region read)
-   S_TYPE: the array's SEXPTYPE (REALSXP, INTSXP or LGLSXP) */
+   S_TYPE: the array's SEXPTYPE (REALSXP, INTSXP or LGLSXP)
+   S_STORE: R_NilValue, or for an array whose chunk grid is its store's,
+     the 1-based R dimension of each stored axis, in store order */
 /* counters */
 enum { ST_ELT, ST_FETCH_CALLS, ST_CHUNKS_FETCHED, ST_EXTRACT,
        ST_HYPERSLAB, ST_MATERIALIZE, ST_REDUCE, ST_EVICT, ST_REGION, ST_LEN };
@@ -515,27 +517,32 @@ static SEXP altarr_Duplicate(SEXP x, Rboolean deep)
     return R_new_altrep(class_for(spec_type(SPEC(x))), SPEC(x), R_NilValue);
 }
 
-/* serialize the recipe, never the payload: list(dim, chunk, fetch, type) */
+/* serialize the recipe, never the payload:
+   list(dim, chunk, fetch, type, store_axes) */
 static SEXP altarr_Serialized_state(SEXP x)
 {
     SEXP spec = SPEC(x);
-    SEXP st = PROTECT(allocVector(VECSXP, 4));
+    SEXP st = PROTECT(allocVector(VECSXP, 5));
     SET_VECTOR_ELT(st, 0, VECTOR_ELT(spec, S_DIM));
     SET_VECTOR_ELT(st, 1, VECTOR_ELT(spec, S_CHUNK));
     SET_VECTOR_ELT(st, 2, VECTOR_ELT(spec, S_FETCH));
     SET_VECTOR_ELT(st, 3, VECTOR_ELT(spec, S_TYPE));
+    SET_VECTOR_ELT(st, 4, VECTOR_ELT(spec, S_STORE));
     UNPROTECT(1);
     return st;
 }
 
-static SEXP make_spec(SEXP dim, SEXP chunk, SEXP fetch, int type);
+static SEXP make_spec(SEXP dim, SEXP chunk, SEXP fetch, int type, SEXP store);
 
-/* recipes saved before typed arrays have three elements: they are double */
+/* recipes saved before typed arrays have three elements: they are double.
+   Recipes saved before store axes have four: their store order is unknown.
+   An older altarr reading a five-element recipe ignores the fifth. */
 static SEXP altarr_Unserialize(SEXP class, SEXP state)
 {
     int type = XLENGTH(state) >= 4 ? asInteger(VECTOR_ELT(state, 3)) : REALSXP;
+    SEXP store = XLENGTH(state) >= 5 ? VECTOR_ELT(state, 4) : R_NilValue;
     SEXP spec = PROTECT(make_spec(VECTOR_ELT(state, 0), VECTOR_ELT(state, 1),
-                                  VECTOR_ELT(state, 2), type));
+                                  VECTOR_ELT(state, 2), type, store));
     SEXP x = R_new_altrep(class_for(type), spec, R_NilValue);
     UNPROTECT(1);
     return x;
@@ -833,7 +840,7 @@ static SEXP C_altarr_region(SEXP x, SEXP i, SEXP n)
 
 /* ---- construction ------------------------------------------------------ */
 
-static SEXP make_spec(SEXP dim, SEXP chunk, SEXP fetch, int type)
+static SEXP make_spec(SEXP dim, SEXP chunk, SEXP fetch, int type, SEXP store)
 {
     if (TYPEOF(dim) != INTSXP || TYPEOF(chunk) != INTSXP ||
         LENGTH(dim) != LENGTH(chunk) || LENGTH(dim) < 1)
@@ -842,6 +849,21 @@ static SEXP make_spec(SEXP dim, SEXP chunk, SEXP fetch, int type)
     if (type != REALSXP && type != INTSXP && type != LGLSXP)
         error("altarr: type must be double, integer or logical");
     int k = LENGTH(dim);
+    if (store != R_NilValue) {
+        /* a permutation of 1..k */
+        if (TYPEOF(store) != INTSXP || LENGTH(store) != k)
+            error("altarr: 'store_axes' must be NULL or an integer vector "
+                  "with one element per dimension");
+        int *seen = (int *) R_alloc((size_t) k, sizeof(int));
+        memset(seen, 0, (size_t) k * sizeof(int));
+        for (int d = 0; d < k; d++) {
+            int a = INTEGER(store)[d];
+            if (a == NA_INTEGER || a < 1 || a > k || seen[a - 1])
+                error("altarr: 'store_axes' must be a permutation of the "
+                      "dimensions");
+            seen[a - 1] = 1;
+        }
+    }
     SEXP nch = PROTECT(allocVector(INTSXP, k));
     double total = 1, len = 1;
     for (int d = 0; d < k; d++) {
@@ -876,6 +898,7 @@ static SEXP make_spec(SEXP dim, SEXP chunk, SEXP fetch, int type)
     REAL(state)[1] = 0;
     REAL(state)[2] = -1;
     SET_VECTOR_ELT(spec, S_TYPE, ScalarInteger(type));
+    SET_VECTOR_ELT(spec, S_STORE, store);
     UNPROTECT(2);
     return spec;
 }
@@ -892,10 +915,11 @@ static int type_from_name(SEXP name)
     return REALSXP; /* not reached */
 }
 
-static SEXP C_altarr_new(SEXP dim, SEXP chunk, SEXP fetch, SEXP type)
+static SEXP C_altarr_new(SEXP dim, SEXP chunk, SEXP fetch, SEXP type,
+                         SEXP store)
 {
     int t = type_from_name(type);
-    SEXP spec = PROTECT(make_spec(dim, chunk, fetch, t));
+    SEXP spec = PROTECT(make_spec(dim, chunk, fetch, t, store));
     SEXP x = PROTECT(R_new_altrep(class_for(t), spec, R_NilValue));
     setAttrib(x, R_DimSymbol, duplicate(dim));
     UNPROTECT(2);
@@ -988,6 +1012,12 @@ static SEXP C_altarr_chunk(SEXP x)
 {
     x = check_altarr(x);
     return duplicate(VECTOR_ELT(SPEC(x), S_CHUNK));
+}
+
+static SEXP C_altarr_store(SEXP x)
+{
+    x = check_altarr(x);
+    return duplicate(VECTOR_ELT(SPEC(x), S_STORE));
 }
 
 static SEXP C_altarr_reset(SEXP x, SEXP drop_cache)
@@ -1112,11 +1142,12 @@ static SEXP C_altarr_hyperslab(SEXP x, SEXP subs)
 
 static const R_CallMethodDef CallEntries[] = {
     {"C_altarr_region", (DL_FUNC) &C_altarr_region, 3},
-    {"C_altarr_new", (DL_FUNC) &C_altarr_new, 4},
+    {"C_altarr_new", (DL_FUNC) &C_altarr_new, 5},
     {"C_altarr_is", (DL_FUNC) &C_altarr_is, 1},
     {"C_altarr_info", (DL_FUNC) &C_altarr_info, 1},
     {"C_altarr_reset", (DL_FUNC) &C_altarr_reset, 2},
     {"C_altarr_chunk", (DL_FUNC) &C_altarr_chunk, 1},
+    {"C_altarr_store", (DL_FUNC) &C_altarr_store, 1},
     {"C_altarr_wrapped", (DL_FUNC) &C_altarr_wrapped, 1},
     {"C_altarr_hyperslab", (DL_FUNC) &C_altarr_hyperslab, 2},
     {NULL, NULL, 0}

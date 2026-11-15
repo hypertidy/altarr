@@ -14,6 +14,15 @@
 #'   `as.logical()` would.
 #' @param dimnames optional dimnames.
 #' @param type the array's type: `"double"`, `"integer"` or `"logical"`.
+#' @param store_axes optional, for an array whose chunk grid is its store's
+#'   own chunk grid: the R dimension of each stored axis, in the store's
+#'   order. That is `rev(seq_along(dim))` for a C-order store (such as Zarr)
+#'   whose shape the array reverses, and `seq_along(dim)` when the store and
+#'   R agree. [altarr_plan()] then names each chunk by its key in the store,
+#'   `dim_0 ..`, as byterefs and zaro do. Leave it `NULL` when the grid is
+#'   not the store's (a window, a view, a rechunking): the plan then has no
+#'   keys. It changes nothing about fetching: `fetch` is always given chunk
+#'   coordinates in R's dimension order.
 #' @return a lazy array.
 #' @examples
 #' ## a 10 x 7 array in 4 x 3 chunks; each value is its own position
@@ -34,14 +43,29 @@
 #' xi <- altarr(d, cs, fetch, type = "integer")
 #' typeof(xi)
 #' sum(xi)
+#' ## a store that keeps the axes in the other order (C order) declares it,
+#' ## and the plan carries the store's chunk keys
+#' xs <- altarr(d, cs, fetch, store_axes = 2:1)
+#' altarr_plan(xs, 9:10, 1:4)
 #' @export
 altarr <- function(dim, chunk, fetch, dimnames = NULL,
-                   type = c("double", "integer", "logical")) {
+                   type = c("double", "integer", "logical"),
+                   store_axes = NULL) {
   type <- match.arg(type)
   dim <- as.integer(dim)
   chunk <- rep_len(as.integer(chunk), length(dim))
   fetch <- match.fun(fetch)
-  x <- .Call(C_altarr_new, dim, chunk, fetch, type)
+  if (!is.null(store_axes)) {
+    if (!is.numeric(store_axes) || anyNA(store_axes) ||
+        !setequal(store_axes, seq_along(dim)) ||
+        length(store_axes) != length(dim)) {
+      stop("'store_axes' must be a permutation of 1:", length(dim),
+           " (the R dimension of each stored axis, in store order)",
+           call. = FALSE)
+    }
+    store_axes <- as.integer(store_axes)
+  }
+  x <- .Call(C_altarr_new, dim, chunk, fetch, type, store_axes)
   if (!is.null(dimnames)) dimnames(x) <- dimnames
   x
 }
@@ -169,6 +193,13 @@ altarr_extract <- function(x, ..., drop = TRUE) {
 #' coordinates, plus each chunk's 1-based start and its extent along every
 #' dimension. The plan is a table; the array is what assembling it gives.
 #'
+#' When the array knows its store's axis order (`store_axes` in [altarr()],
+#' set by [altarr_zarr_v2()]), each row starts with the chunk's key in the
+#' store: `dim_0 ..`, 0-based chunk indexes in store order. These are the
+#' column names of a byterefs view and of zaro's plans, so a plan joins to
+#' them on those columns, one array at a time. The plan holds no bytes or
+#' presence: those come from the join.
+#'
 #' @inheritParams altarr_extract
 #' @return a data frame, one row per chunk.
 #' @examples
@@ -190,6 +221,12 @@ altarr_plan <- function(x, ...) {
     start <- plan[[k]] * chunk[k] + 1L
     plan[[paste0(nm[k], "_start")]] <- start
     plan[[paste0(nm[k], "_n")]] <- pmin(chunk[k], d[k] - start + 1L)
+  }
+  axes <- .Call(C_altarr_store, x)
+  if (!is.null(axes)) {
+    keys <- lapply(axes, function(a) plan[[a]])
+    names(keys) <- paste0("dim_", seq_along(axes) - 1L)
+    plan <- cbind(as.data.frame(keys), plan)
   }
   plan
 }

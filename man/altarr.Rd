@@ -9,7 +9,8 @@ altarr(
   chunk,
   fetch,
   dimnames = NULL,
-  type = c("double", "integer", "logical")
+  type = c("double", "integer", "logical"),
+  store_axes = NULL
 )
 }
 \arguments{
@@ -27,6 +28,16 @@ logical vectors are coerced as \code{as.double()}, \code{as.integer()} or
 \item{dimnames}{optional dimnames.}
 
 \item{type}{the array's type: \code{"double"}, \code{"integer"} or \code{"logical"}.}
+
+\item{store_axes}{optional, for an array whose chunk grid is its store's
+own chunk grid: the R dimension of each stored axis, in the store's
+order. That is \code{rev(seq_along(dim))} for a C-order store (such as Zarr)
+whose shape the array reverses, and \code{seq_along(dim)} when the store and
+R agree. \code{\link[=altarr_plan]{altarr_plan()}} then names each chunk by its key in the store,
+\verb{dim_0 ..}, as byterefs and zaro do. Leave it \code{NULL} when the grid is
+not the store's (a window, a view, a rechunking): the plan then has no
+keys. It changes nothing about fetching: \code{fetch} is always given chunk
+coordinates in R's dimension order.}
 }
 \value{
 a lazy array.
@@ -55,4 +66,8 @@ altarr_stats(x)[c("fetch_calls", "chunks_fetched")]
 xi <- altarr(d, cs, fetch, type = "integer")
 typeof(xi)
 sum(xi)
+## a store that keeps the axes in the other order (C order) declares it,
+## and the plan carries the store's chunk keys
+xs <- altarr(d, cs, fetch, store_axes = 2:1)
+altarr_plan(xs, 9:10, 1:4)
 }
