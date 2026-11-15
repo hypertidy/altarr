@@ -127,7 +127,10 @@ with design notes and measurements in
   bytes for the 378M-value array. `readRDS()` in a fresh session auto-loads
   the package and returns a lazy array.
 - `altarr_plan(x, i, j, k)` returns the plan as a data frame, one row per
-  chunk. The plan is a table; the array is what assembling it gives.
+  chunk. The plan is a table; the array is what assembling it gives. An
+  array that knows its store's axis order (`store_axes`, set by
+  `altarr_zarr_v2()`) starts each row with the store's chunk key,
+  `dim_0 ..`, so plans join to byterefs views and zaro's plans.
 
 ## Whole-array reductions
 

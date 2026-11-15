@@ -19,6 +19,14 @@ One row per chunk that \code{x[i, j, k]} would touch: 0-based chunk
 coordinates, plus each chunk's 1-based start and its extent along every
 dimension. The plan is a table; the array is what assembling it gives.
 }
+\details{
+When the array knows its store's axis order (\code{store_axes} in \code{\link[=altarr]{altarr()}},
+set by \code{\link[=altarr_zarr_v2]{altarr_zarr_v2()}}), each row starts with the chunk's key in the
+store: \verb{dim_0 ..}, 0-based chunk indexes in store order. These are the
+column names of a byterefs view and of zaro's plans, so a plan joins to
+them on those columns, one array at a time. The plan holds no bytes or
+presence: those come from the join.
+}
 \examples{
 x <- altarr_zarr_v2(altarr_example_zarr())
 altarr_plan(x, 1:40, 1:20, 1:3)

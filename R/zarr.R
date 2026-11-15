@@ -20,7 +20,9 @@
 #'
 #' A C-order Zarr array of shape `(s1, ..., sn)` is returned with R `dim`
 #' `c(sn, ..., s1)`: C-order bytes are already column-major for the
-#' reversed shape, so no transposition is ever done.
+#' reversed shape, so no transposition is ever done. The array records
+#' that order (`store_axes` in [altarr()]), so [altarr_plan()] names each
+#' chunk by its Zarr chunk key, `dim_0 ..`.
 #'
 #' @param path directory of the Zarr v2 array (containing `.zarray`)
 #' @param unpack apply CF `scale_factor`, `add_offset`, `_FillValue` and
@@ -129,5 +131,6 @@ altarr_zarr_v2 <- function(path, unpack = TRUE) {
       decode(v)
     })
   }
-  altarr(d, cs, fetch, type = out_type)
+  altarr(d, cs, fetch, type = out_type,
+         store_axes = if (rev_c) rev(seq_along(d)) else seq_along(d))
 }

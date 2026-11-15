@@ -91,6 +91,42 @@ p <- altarr_plan(x, 2:6, 2, 3:4)
 invisible(altarr_extract(x, 2:6, 2, 3:4))
 stopifnot(nrow(p) == altarr_stats(x)[["chunks_fetched"]])
 
+## ---- store keys: dim_0 .., in store order, only when declared -----------
+check(grep("^dim_", names(p), value = TRUE), character(0),
+      "no store keys unless the array declares its store order")
+zpath <- altarr_example_zarr()
+zk <- altarr_zarr_v2(zpath)               # C order: the store's axes reversed
+pk <- altarr_plan(zk, 1:40, 1:20, 1:3)
+check(names(pk)[1:3], c("dim_0", "dim_1", "dim_2"), "store keys lead the plan")
+check(pk$dim_0, pk$d3, "dim_0 is the last R dimension")
+check(pk$dim_2, pk$d1, "dim_2 is the first R dimension")
+## each key names the chunk the fetch reads, and the extents are unchanged
+stopifnot(all(file.exists(file.path(zpath,
+  paste(pk$dim_0, pk$dim_1, pk$dim_2, sep = ".")))))
+check(pk[-(1:3)], altarr_plan(altarr(dim(zk), c(20L, 16L, 7L), function(ch) NULL),
+                              1:40, 1:20, 1:3), "own columns as before")
+check(nrow(altarr_plan(zk, integer(0), 1, 1)), 0L, "an empty plan keeps its keys")
+check(names(altarr_plan(zk, integer(0), 1, 1))[1], "dim_0", "empty plan columns")
+
+## any permutation, and dimension names on the plan's own columns
+f0 <- function(ch) lapply(seq_len(nrow(ch)), function(r) 0)
+sp <- altarr(c(7L, 5L, 4L), c(3L, 2L, 3L), f0, store_axes = c(2, 3, 1),
+             dimnames = list(a = NULL, b = NULL, c = NULL))
+pp <- altarr_plan(sp, 7, 5, 4)
+check(unlist(pp[c("dim_0", "dim_1", "dim_2")], use.names = FALSE),
+      c(pp$b, pp$c, pp$a), "store axes as a permutation")
+check(names(pp)[4:6], c("a", "b", "c"), "named R dimensions follow the keys")
+for (bad in list(c(1, 1, 2), 1:2, c(1, 2, 4), c(1.5, 2, 3), c(NA, 2, 3), "a")) {
+  stopifnot(inherits(try(altarr(c(7L, 5L, 4L), 3L, f0, store_axes = bad),
+                         silent = TRUE), "try-error"))
+}
+
+## the store order survives R's wrapper and a saved recipe
+zw <- zk; dimnames(zw) <- list(x = NULL, y = NULL, z = NULL)
+check(altarr_plan(zw, 1, 1, 30)$dim_0, 4L, "store keys through the wrapper")
+fk <- tempfile(fileext = ".rds"); saveRDS(zk, fk)
+check(altarr_plan(readRDS(fk), 1:40, 1:20, 1:3), pk, "store keys round trip")
+
 ## ---- the cache: a second read of the same region fetches nothing --------
 altarr_reset(x)
 invisible(x[1:7, 1:5, 1])
