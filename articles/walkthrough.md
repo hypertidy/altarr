@@ -152,11 +152,11 @@ seen(x)
 #>              0 
 #> chunks now cached: 4 of 80   materialized: no
 altarr_plan(x, 1:40, 1:20, 1:3)
-#>   d1 d2 d3 d1_start d1_n d2_start d2_n d3_start d3_n
-#> 1  0  0  0        1   20        1   16        1    7
-#> 2  1  0  0       21   20        1   16        1    7
-#> 3  0  1  0        1   20       17   16        1    7
-#> 4  1  1  0       21   20       17   16        1    7
+#>   dim_0 dim_1 dim_2 d1 d2 d3 d1_start d1_n d2_start d2_n d3_start d3_n
+#> 1     0     0     0  0  0  0        1   20        1   16        1    7
+#> 2     0     0     1  1  0  0       21   20        1   16        1    7
+#> 3     0     1     0  0  1  0        1   20       17   16        1    7
+#> 4     0     1     1  1  1  0       21   20       17   16        1    7
 ```
 
 ## 7. Materialization: when R wants all the data
@@ -242,7 +242,7 @@ chunk `x3` itself read. The cache is bounded: see
 f <- tempfile(fileext = ".rds")
 saveRDS(x3, f)
 file.size(f)   # the path, shape and chunking, not 105,000 values
-#> [1] 4935
+#> [1] 4945
 x4 <- readRDS(f)
 x4[pts]
 #> [1] 104999  50714 101500

@@ -12,7 +12,8 @@ altarr(
   chunk,
   fetch,
   dimnames = NULL,
-  type = c("double", "integer", "logical")
+  type = c("double", "integer", "logical"),
+  store_axes = NULL
 )
 ```
 
@@ -45,6 +46,19 @@ altarr(
 
   the array's type: `"double"`, `"integer"` or `"logical"`.
 
+- store_axes:
+
+  optional, for an array whose chunk grid is its store's own chunk grid:
+  the R dimension of each stored axis, in the store's order. That is
+  `rev(seq_along(dim))` for a C-order store (such as Zarr) whose shape
+  the array reverses, and `seq_along(dim)` when the store and R agree.
+  [`altarr_plan()`](https://hypertidy.github.io/altarr/reference/altarr_plan.md)
+  then names each chunk by its key in the store, `dim_0 ..`, as byterefs
+  and zaro do. Leave it `NULL` when the grid is not the store's (a
+  window, a view, a rechunking): the plan then has no keys. It changes
+  nothing about fetching: `fetch` is always given chunk coordinates in
+  R's dimension order.
+
 ## Value
 
 a lazy array.
@@ -76,4 +90,11 @@ typeof(xi)
 #> [1] "integer"
 sum(xi)
 #> [1] 2485
+## a store that keeps the axes in the other order (C order) declares it,
+## and the plan carries the store's chunk keys
+xs <- altarr(d, cs, fetch, store_axes = 2:1)
+altarr_plan(xs, 9:10, 1:4)
+#>   dim_0 dim_1 d1 d2 d1_start d1_n d2_start d2_n
+#> 1     0     2  2  0        9    2        1    3
+#> 2     1     2  2  1        9    2        4    3
 ```

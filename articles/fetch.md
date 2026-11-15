@@ -232,7 +232,10 @@ chunk of shape `c(s3, s2, s1)`. So:
 
 - give altarr the reversed shape and reversed chunk shape;
 - reverse each row of `chunks` before you build the store’s chunk key;
-- never transpose a chunk.
+- never transpose a chunk;
+- if altarr’s chunk grid is the store’s own, say so with
+  `store_axes = rev(seq_along(dim))`. altarr then names each chunk of a
+  plan by the store’s key, as below.
 
 [`altarr_zarr_v2()`](https://hypertidy.github.io/altarr/reference/altarr_zarr_v2.md)
 does exactly this, and its source is a compact worked example:
@@ -240,6 +243,25 @@ does exactly this, and its source is a compact worked example:
 that came from netCDF or Zarr. `x[lon, lat, time]` corresponds to the
 store’s `var[time, lat, lon]`, which is the same convention ncdf4 and
 RNetCDF use.
+
+With `store_axes` set, every row of
+[`altarr_plan()`](https://hypertidy.github.io/altarr/reference/altarr_plan.md)
+starts with the chunk’s key in the store, `dim_0 ..` in store order, the
+column names of a byterefs view and of zaro’s plans:
+
+``` r
+
+x <- altarr_zarr_v2(altarr_example_zarr())
+altarr_plan(x, 1:40, 1, 1)
+#>   dim_0 dim_1 dim_2 d1 d2 d3 d1_start d1_n d2_start d2_n d3_start d3_n
+#> 1     0     0     0  0  0  0        1   20        1   16        1    7
+#> 2     0     0     1  1  0  0       21   20        1   16        1    7
+```
+
+Leave `store_axes` unset when the grid is not the store’s, such as a
+window that starts partway through a chunk, a view of selected
+positions, or a different chunk shape. Keys are given only when they are
+known.
 
 ## 6. Types, missing values and unpacking
 
@@ -286,7 +308,7 @@ z <- altarr(c(400L, 300L), c(64L, 64L),
 f <- tempfile(fileext = ".rds")
 saveRDS(z, f)
 file.size(f)   # bytes, for 120,000 values
-#> [1] 370
+#> [1] 369
 ```
 
 Two traps:
@@ -392,7 +414,8 @@ the best fit for section 8.
   subsets, fetch calls, chunks fetched, materializations, evictions) and
   the cache state. Use `altarr_reset(x)` between experiments.
 - `altarr_plan(x, i, j, k)`: the chunks a rectangular subscript touches,
-  as a data frame. It is useful for checking chunk keys by hand.
+  as a data frame. It is useful for checking chunk keys by hand, and
+  with `store_axes` it gives them in the store’s order (section 5).
 - `options(altarr.max_materialize = 0)`: refuse all materialization, so
   any operation that would read the whole array errors instead. Run your
   workflow under it to find what materializes.

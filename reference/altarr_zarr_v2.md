@@ -6,12 +6,6 @@ arrays with dtype `<f8`, `<f4`, `<i4`, `<i2`, `|i1`, `<u2`, `|u1` or
 `|b1`, compressor `null` or `zlib`, order `C` or `F`, and missing chunk
 files (read as `fill_value`). Zarr's padded edge chunks are clipped.
 
-This is a demonstration, not a Zarr implementation: no Zarr v3, no
-remote stores, no other codecs. For real stores, use a full Zarr reader
-and hand its chunk reads to
-[`altarr()`](https://hypertidy.github.io/altarr/reference/altarr.md) as
-the fetch function.
-
 ## Usage
 
 ``` r
@@ -36,6 +30,12 @@ a lazy array, see
 
 ## Details
 
+This is a demonstration, not a Zarr implementation: no Zarr v3, no
+remote stores, no other codecs. For real stores, use a full Zarr reader
+and hand its chunk reads to
+[`altarr()`](https://hypertidy.github.io/altarr/reference/altarr.md) as
+the fetch function.
+
 The array's type follows the dtype: floats give a double array, integers
 an integer array, `|b1` a logical array. With `unpack = TRUE`, CF
 packing attributes found in `.zattrs` are applied inside the fetch:
@@ -46,7 +46,12 @@ missing.
 
 A C-order Zarr array of shape `(s1, ..., sn)` is returned with R `dim`
 `c(sn, ..., s1)`: C-order bytes are already column-major for the
-reversed shape, so no transposition is ever done.
+reversed shape, so no transposition is ever done. The array records that
+order (`store_axes` in
+[`altarr()`](https://hypertidy.github.io/altarr/reference/altarr.md)),
+so
+[`altarr_plan()`](https://hypertidy.github.io/altarr/reference/altarr_plan.md)
+names each chunk by its Zarr chunk key, `dim_0 ..`.
 
 ## Examples
 

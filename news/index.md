@@ -1,5 +1,23 @@
 # Changelog
 
+## altarr (development version)
+
+- [`altarr()`](https://hypertidy.github.io/altarr/reference/altarr.md)
+  takes `store_axes`, for an array whose chunk grid is its store’s own:
+  the R dimension of each stored axis, in store order
+  (`rev(seq_along(dim))` for a C-order store whose shape the array
+  reverses).
+  [`altarr_plan()`](https://hypertidy.github.io/altarr/reference/altarr_plan.md)
+  then starts each row with the chunk’s key in the store, `dim_0 ..`,
+  the column names of byterefs views and zaro’s plans, so a plan joins
+  to them; its own columns are unchanged. Without `store_axes` (the
+  default) the plan has no keys, since altarr cannot know whether its
+  grid is the store’s.
+  [`altarr_zarr_v2()`](https://hypertidy.github.io/altarr/reference/altarr_zarr_v2.md)
+  sets it. Saved recipes carry it; recipes saved by earlier versions
+  load with it unset, and earlier versions load new recipes and ignore
+  it.
+
 ## altarr 0.1.1
 
 First CRAN submission.
