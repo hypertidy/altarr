@@ -6,6 +6,12 @@
 #' `|b1`, compressor `null` or `zlib`, order `C` or `F`, and missing chunk
 #' files (read as `fill_value`). Zarr's padded edge chunks are clipped.
 #'
+#' The store is listed once, when the array is made, and that listing is
+#' the array's chunk index (`present` in [altarr()]): a chunk with no file
+#' is never read, its cells are `fill_value` (decoded as below), and
+#' `sum()`, `min()` and `max()` count them from the index. See
+#' [altarr_present()].
+#'
 #' This is a demonstration, not a Zarr implementation: no Zarr v3, no
 #' remote stores, no other codecs. For real stores, use a full Zarr reader
 #' and hand its chunk reads to [altarr()] as the fetch function.
@@ -110,6 +116,14 @@ altarr_zarr_v2 <- function(path, unpack = TRUE) {
   cs <- as.integer(if (rev_c) rev(zchunk) else zchunk)
   full <- prod(cs)
 
+  ## the chunk index: one listing of the store, matched to every chunk key
+  nch <- (d + cs - 1L) %/% cs
+  grid <- as.matrix(expand.grid(lapply(nch, function(n) seq_len(n) - 1L)))
+  keys <- if (rev_c) grid[, rev(seq_len(ncol(grid))), drop = FALSE] else grid
+  keys <- do.call(paste, c(as.data.frame(keys), sep = sep))
+  have <- list.files(path, recursive = identical(sep, "/"), all.files = FALSE)
+  present <- keys %in% have
+
   fetch <- function(chunks) {
     lapply(seq_len(nrow(chunks)), function(r) {
       cc <- chunks[r, ]
@@ -132,5 +146,6 @@ altarr_zarr_v2 <- function(path, unpack = TRUE) {
     })
   }
   altarr(d, cs, fetch, type = out_type,
-         store_axes = if (rev_c) rev(seq_along(d)) else seq_along(d))
+         store_axes = if (rev_c) rev(seq_along(d)) else seq_along(d),
+         present = present, fill = decode(fill))
 }

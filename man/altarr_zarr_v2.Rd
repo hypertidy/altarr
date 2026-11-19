@@ -23,6 +23,12 @@ arrays with dtype \verb{<f8}, \verb{<f4}, \verb{<i4}, \verb{<i2}, \verb{|i1}, \v
 files (read as \code{fill_value}). Zarr's padded edge chunks are clipped.
 }
 \details{
+The store is listed once, when the array is made, and that listing is
+the array's chunk index (\code{present} in \code{\link[=altarr]{altarr()}}): a chunk with no file
+is never read, its cells are \code{fill_value} (decoded as below), and
+\code{sum()}, \code{min()} and \code{max()} count them from the index. See
+\code{\link[=altarr_present]{altarr_present()}}.
+
 This is a demonstration, not a Zarr implementation: no Zarr v3, no
 remote stores, no other codecs. For real stores, use a full Zarr reader
 and hand its chunk reads to \code{\link[=altarr]{altarr()}} as the fetch function.

@@ -34,6 +34,14 @@
  *   clipped to the array edge (edge chunks are NOT padded). Chunks should be
  *   of the array's type; other numeric or logical vectors are coerced as
  *   as.double(), as.integer() or as.logical() would.
+ *
+ * Absent chunks (optional): an array may be given a chunk index, 'present',
+ * one logical per chunk of the grid, and a 'fill' value. A chunk marked
+ * FALSE is never passed to fetch(): every value in it is 'fill', as in a
+ * Zarr store where unwritten chunks read as fill_value. get_chunks() hands
+ * back R_NilValue for such a chunk, never caches it, and every reader
+ * writes the fill value instead. sum(), min() and max() count the absent
+ * cells from the index without touching them.
  */
 
 #include <string.h>
@@ -49,18 +57,24 @@ static R_altrep_class_t altarr_real_class, altarr_int_class, altarr_lgl_class;
 
 /* data1: shared spec (shared by duplicates, so the cache is shared too) */
 enum { S_DIM, S_CHUNK, S_FETCH, S_NCHUNK, S_CACHE, S_STATS, S_TICK, S_STATE,
-       S_TYPE, S_STORE, S_LEN };
+       S_TYPE, S_STORE, S_PRESENT, S_FILL, S_LEN };
 /* S_TICK: per chunk, the clock value when it was last used (for LRU)
    S_STATE: c(clock, bytes currently cached, end of the last region read)
    S_TYPE: the array's SEXPTYPE (REALSXP, INTSXP or LGLSXP)
    S_STORE: R_NilValue, or for an array whose chunk grid is its store's,
-     the 1-based R dimension of each stored axis, in store order */
+     the 1-based R dimension of each stored axis, in store order
+   S_PRESENT: R_NilValue (every chunk is stored), or a logical vector with
+     one element per chunk of the grid: FALSE means absent, read as fill
+   S_FILL: the value of every cell of an absent chunk, length 1, of the
+     array's type (NA when not given) */
 /* counters */
 enum { ST_ELT, ST_FETCH_CALLS, ST_CHUNKS_FETCHED, ST_EXTRACT,
-       ST_HYPERSLAB, ST_MATERIALIZE, ST_REDUCE, ST_EVICT, ST_REGION, ST_LEN };
+       ST_HYPERSLAB, ST_MATERIALIZE, ST_REDUCE, ST_EVICT, ST_REGION,
+       ST_ABSENT, ST_LEN };
 static const char *stat_names[ST_LEN] = {
     "elt", "fetch_calls", "chunks_fetched", "extract_subset",
-    "hyperslab", "materialize", "reduce", "evictions", "region"
+    "hyperslab", "materialize", "reduce", "evictions", "region",
+    "chunks_absent"
 };
 /* data2: the materialized vector, or R_NilValue */
 
@@ -101,6 +115,34 @@ static inline void *data_ptr(SEXP v)
 static inline void bump(SEXP spec, int k, double by)
 {
     REAL(VECTOR_ELT(spec, S_STATS))[k] += by;
+}
+
+/* is chunk cid absent (never fetched, all fill)? */
+static inline int is_absent(SEXP spec, R_xlen_t cid)
+{
+    SEXP p = VECTOR_ELT(spec, S_PRESENT);
+    return p != R_NilValue && LOGICAL_RO(p)[cid] == FALSE;
+}
+
+static inline double fill_real(SEXP spec)
+{
+    return REAL_RO(VECTOR_ELT(spec, S_FILL))[0];
+}
+
+static inline int fill_int(SEXP spec)
+{
+    return iptr_ro(VECTOR_ELT(spec, S_FILL))[0];
+}
+
+/* value at offset 'off' of chunk 'ch', which is R_NilValue if absent */
+static inline double chunk_real(SEXP spec, SEXP ch, R_xlen_t off)
+{
+    return ch == R_NilValue ? fill_real(spec) : REAL_RO(ch)[off];
+}
+
+static inline int chunk_int(SEXP spec, SEXP ch, R_xlen_t off)
+{
+    return ch == R_NilValue ? fill_int(spec) : iptr_ro(ch)[off];
 }
 
 static R_xlen_t spec_length(SEXP spec)
@@ -276,7 +318,8 @@ static void cache_clear(SEXP spec)
 
 /* The chunks cids[0..n) (unique), as a list aligned with cids. Cached ones
    are marked as just used; missing ones are fetched in ONE call and offered
-   to the cache, which is then trimmed to its budget. Caller protects. */
+   to the cache, which is then trimmed to its budget. Absent chunks are
+   R_NilValue in the list: not fetched, not cached. Caller protects. */
 static SEXP get_chunks(SEXP spec, const R_xlen_t *cids, R_xlen_t n)
 {
     SEXP cache = VECTOR_ELT(spec, S_CACHE);
@@ -287,6 +330,10 @@ static SEXP get_chunks(SEXP spec, const R_xlen_t *cids, R_xlen_t n)
     R_xlen_t *where = (R_xlen_t *) R_alloc(n > 0 ? n : 1, sizeof(R_xlen_t));
     R_xlen_t m = 0;
     for (R_xlen_t i = 0; i < n; i++) {
+        if (is_absent(spec, cids[i])) {
+            bump(spec, ST_ABSENT, 1);
+            continue;   /* out[i] stays R_NilValue */
+        }
         SEXP c = VECTOR_ELT(cache, cids[i]);
         if (c != R_NilValue) {
             SET_VECTOR_ELT(out, i, c);
@@ -340,6 +387,10 @@ static void read_elt(SEXP spec, R_xlen_t li, double *dv, int *iv)
 {
     R_xlen_t cid, off;
     locate(spec, li, &cid, &off);
+    if (is_absent(spec, cid)) {
+        if (dv) *dv = fill_real(spec); else *iv = fill_int(spec);
+        return;
+    }
     SEXP ch = VECTOR_ELT(VECTOR_ELT(spec, S_CACHE), cid);
     if (ch != R_NilValue) {
         /* advance the clock so a hit always counts as more recent than
@@ -428,13 +479,25 @@ static void *altarr_Dataptr(SEXP x, Rboolean writable)
         R_xlen_t nc = XLENGTH(cache), bsize = batch_chunks();
         R_xlen_t *need = (R_xlen_t *) R_alloc(bsize, sizeof(R_xlen_t));
         d2 = PROTECT(allocVector(spec_type(spec), n));
+        int sparse = VECTOR_ELT(spec, S_PRESENT) != R_NilValue;
+        if (sparse) {   /* absent chunks are simply never overwritten */
+            if (TYPEOF(d2) == REALSXP) {
+                double f = fill_real(spec), *p = REAL(d2);
+                for (R_xlen_t i = 0; i < n; i++) p[i] = f;
+            } else {
+                int f = fill_int(spec), *p = iptr(d2);
+                for (R_xlen_t i = 0; i < n; i++) p[i] = f;
+            }
+        }
         for (R_xlen_t b0 = 0; b0 < nc; b0 += bsize) {
             R_xlen_t b1 = b0 + bsize < nc ? b0 + bsize : nc, m = 0;
             for (R_xlen_t c = b0; c < b1; c++)
-                if (VECTOR_ELT(cache, c) == R_NilValue) need[m++] = c;
+                if (!is_absent(spec, c) && VECTOR_ELT(cache, c) == R_NilValue)
+                    need[m++] = c;
             SEXP fresh = PROTECT(m > 0 ? fetch_raw(spec, need, m) : R_NilValue);
             R_xlen_t j = 0;
             for (R_xlen_t c = b0; c < b1; c++) {
+                if (is_absent(spec, c)) { bump(spec, ST_ABSENT, 1); continue; }
                 SEXP ch = VECTOR_ELT(cache, c);
                 if (ch == R_NilValue) ch = VECTOR_ELT(fresh, j++);
                 scatter_chunk(spec, c, ch, d2);
@@ -502,7 +565,8 @@ static SEXP altarr_Extract_subset(SEXP x, SEXP indx, SEXP call)
         R_xlen_t cid, off;
         locate(spec, li[i], &cid, &off);
         SEXP ch = VECTOR_ELT(got, pos[cid]);
-        if (is_real) rd[i] = REAL_RO(ch)[off]; else ri[i] = iptr_ro(ch)[off];
+        if (is_real) rd[i] = chunk_real(spec, ch, off);
+        else ri[i] = chunk_int(spec, ch, off);
     }
     UNPROTECT(2);
     return res;
@@ -518,31 +582,38 @@ static SEXP altarr_Duplicate(SEXP x, Rboolean deep)
 }
 
 /* serialize the recipe, never the payload:
-   list(dim, chunk, fetch, type, store_axes) */
+   list(dim, chunk, fetch, type, store_axes, present, fill) */
 static SEXP altarr_Serialized_state(SEXP x)
 {
     SEXP spec = SPEC(x);
-    SEXP st = PROTECT(allocVector(VECSXP, 5));
+    SEXP st = PROTECT(allocVector(VECSXP, 7));
     SET_VECTOR_ELT(st, 0, VECTOR_ELT(spec, S_DIM));
     SET_VECTOR_ELT(st, 1, VECTOR_ELT(spec, S_CHUNK));
     SET_VECTOR_ELT(st, 2, VECTOR_ELT(spec, S_FETCH));
     SET_VECTOR_ELT(st, 3, VECTOR_ELT(spec, S_TYPE));
     SET_VECTOR_ELT(st, 4, VECTOR_ELT(spec, S_STORE));
+    SET_VECTOR_ELT(st, 5, VECTOR_ELT(spec, S_PRESENT));
+    SET_VECTOR_ELT(st, 6, VECTOR_ELT(spec, S_FILL));
     UNPROTECT(1);
     return st;
 }
 
-static SEXP make_spec(SEXP dim, SEXP chunk, SEXP fetch, int type, SEXP store);
+static SEXP make_spec(SEXP dim, SEXP chunk, SEXP fetch, int type, SEXP store,
+                      SEXP present, SEXP fill);
 
 /* recipes saved before typed arrays have three elements: they are double.
    Recipes saved before store axes have four: their store order is unknown.
-   An older altarr reading a five-element recipe ignores the fifth. */
+   Recipes saved before chunk indexes have five: every chunk is stored.
+   An older altarr reading a longer recipe ignores the extra elements. */
 static SEXP altarr_Unserialize(SEXP class, SEXP state)
 {
     int type = XLENGTH(state) >= 4 ? asInteger(VECTOR_ELT(state, 3)) : REALSXP;
     SEXP store = XLENGTH(state) >= 5 ? VECTOR_ELT(state, 4) : R_NilValue;
+    SEXP present = XLENGTH(state) >= 7 ? VECTOR_ELT(state, 5) : R_NilValue;
+    SEXP fill = XLENGTH(state) >= 7 ? VECTOR_ELT(state, 6) : R_NilValue;
     SEXP spec = PROTECT(make_spec(VECTOR_ELT(state, 0), VECTOR_ELT(state, 1),
-                                  VECTOR_ELT(state, 2), type, store));
+                                  VECTOR_ELT(state, 2), type, store,
+                                  present, fill));
     SEXP x = R_new_altrep(class_for(type), spec, R_NilValue);
     UNPROTECT(1);
     return x;
@@ -559,7 +630,8 @@ static Rboolean altarr_Inspect(SEXP x, int pre, int deep, int pvec,
     Rprintf("] chunk [");
     for (int d = 0; d < LENGTH(cs); d++)
         Rprintf("%s%d", d ? "," : "", INTEGER(cs)[d]);
-    Rprintf("] %s\n", R_altrep_data2(x) == R_NilValue ? "lazy" : "materialized");
+    Rprintf("] %s%s\n", R_altrep_data2(x) == R_NilValue ? "lazy" : "materialized",
+            VECTOR_ELT(spec, S_PRESENT) == R_NilValue ? "" : " sparse");
     return TRUE;
 }
 
@@ -614,15 +686,22 @@ static SEXP reduce_lazy(SEXP x, int op, Rboolean narm)
     long double sum = 0;   /* R's internal LDOUBLE */
     double best = 0;
     Rboolean updated = FALSE;
+    double nabsent = 0;    /* cells in absent chunks: all fill */
     bump(spec, ST_REDUCE, 1);
 
     for (R_xlen_t b0 = 0; b0 < nc; b0 += bsize) {
         R_xlen_t b1 = b0 + bsize < nc ? b0 + bsize : nc, m = 0;
         for (R_xlen_t c = b0; c < b1; c++)
-            if (VECTOR_ELT(cache, c) == R_NilValue) need[m++] = c;
+            if (!is_absent(spec, c) && VECTOR_ELT(cache, c) == R_NilValue)
+                need[m++] = c;
         SEXP fresh = PROTECT(m > 0 ? fetch_raw(spec, need, m) : R_NilValue);
         R_xlen_t j = 0;
         for (R_xlen_t c = b0; c < b1; c++) {
+            if (is_absent(spec, c)) {
+                bump(spec, ST_ABSENT, 1);
+                nabsent += (double) chunk_size(spec, c);
+                continue;
+            }
             SEXP ch = VECTOR_ELT(cache, c);
             if (ch == R_NilValue) ch = VECTOR_ELT(fresh, j++);
             const double *v = REAL_RO(ch);
@@ -646,6 +725,25 @@ static SEXP reduce_lazy(SEXP x, int op, Rboolean narm)
             }
         }
         UNPROTECT(1);
+    }
+
+    /* the absent cells, from the chunk index alone: nabsent copies of fill */
+    if (nabsent > 0) {
+        double f = fill_real(spec);
+        if (op == RED_SUM) {
+            if (!narm || !ISNAN(f)) {
+                updated = TRUE;
+                sum += ISNAN(f) ? (long double) f : (long double) f * nabsent;
+            }
+        } else if (ISNAN(f)) {
+            if (!narm) {
+                if (!ISNA(best)) best = f;
+                updated = TRUE;
+            }
+        } else if (!updated || (op == RED_MIN ? f < best : f > best)) {
+            best = f;
+            updated = TRUE;
+        }
     }
 
     if (op == RED_SUM) {
@@ -700,6 +798,7 @@ static void prefetch_scan(SEXP spec, const R_xlen_t *u, R_xlen_t nu)
     R_xlen_t *need = (R_xlen_t *) R_alloc(bsize, sizeof(R_xlen_t));
     R_xlen_t done_lo = -1, done_hi = -1;     /* last window prefetched */
     for (R_xlen_t j = 0; j < nu; j++) {
+        if (is_absent(spec, u[j])) continue;
         if (VECTOR_ELT(cache, u[j]) != R_NilValue) continue;
         if (u[j] >= done_lo && u[j] < done_hi) continue;
         R_xlen_t lo = k == 1 ? u[j] : (u[j] / layer) * layer;
@@ -707,7 +806,8 @@ static void prefetch_scan(SEXP spec, const R_xlen_t *u, R_xlen_t nu)
         for (R_xlen_t b0 = lo; b0 < hi; b0 += bsize) {
             R_xlen_t b1 = b0 + bsize < hi ? b0 + bsize : hi, m = 0;
             for (R_xlen_t c = b0; c < b1; c++)
-                if (VECTOR_ELT(cache, c) == R_NilValue) need[m++] = c;
+                if (!is_absent(spec, c) && VECTOR_ELT(cache, c) == R_NilValue)
+                    need[m++] = c;
             if (m > 0) get_chunks(spec, need, m);   /* result unused: now cached */
         }
         done_lo = lo;
@@ -798,10 +898,10 @@ static R_xlen_t region_read(SEXP x, R_xlen_t i, R_xlen_t n, double *dbuf, int *i
     SEXP got = PROTECT(get_chunks(spec, u, nu));
     if (dbuf) {
         for (R_xlen_t e = 0; e < n; e++)
-            dbuf[e] = REAL_RO(VECTOR_ELT(got, slot[e]))[off[e]];
+            dbuf[e] = chunk_real(spec, VECTOR_ELT(got, slot[e]), off[e]);
     } else {
         for (R_xlen_t e = 0; e < n; e++)
-            ibuf[e] = iptr_ro(VECTOR_ELT(got, slot[e]))[off[e]];
+            ibuf[e] = chunk_int(spec, VECTOR_ELT(got, slot[e]), off[e]);
     }
     UNPROTECT(1);
     return n;
@@ -840,7 +940,8 @@ static SEXP C_altarr_region(SEXP x, SEXP i, SEXP n)
 
 /* ---- construction ------------------------------------------------------ */
 
-static SEXP make_spec(SEXP dim, SEXP chunk, SEXP fetch, int type, SEXP store)
+static SEXP make_spec(SEXP dim, SEXP chunk, SEXP fetch, int type, SEXP store,
+                      SEXP present, SEXP fill)
 {
     if (TYPEOF(dim) != INTSXP || TYPEOF(chunk) != INTSXP ||
         LENGTH(dim) != LENGTH(chunk) || LENGTH(dim) < 1)
@@ -880,6 +981,24 @@ static SEXP make_spec(SEXP dim, SEXP chunk, SEXP fetch, int type, SEXP store)
         error("altarr: array has %.0f values, more than R's maximum vector "
               "length (%.0f)", len, (double) R_XLEN_T_MAX);
     if (total > R_XLEN_T_MAX) error("altarr: chunk grid too large");
+    if (present != R_NilValue) {
+        if (TYPEOF(present) != LGLSXP || XLENGTH(present) != (R_xlen_t) total)
+            error("altarr: 'present' must be NULL or a logical vector with one "
+                  "element per chunk (%.0f)", total);
+        for (R_xlen_t c = 0; c < XLENGTH(present); c++)
+            if (LOGICAL_RO(present)[c] == NA_LOGICAL)
+                error("altarr: 'present' must not contain NA");
+    }
+    /* fill: one value of the array's type, NA if not given */
+    if (fill == R_NilValue || XLENGTH(fill) < 1) {
+        fill = PROTECT(allocVector(type, 1));
+        if (type == REALSXP) REAL(fill)[0] = NA_REAL;
+        else iptr(fill)[0] = NA_INTEGER;   /* NA_LOGICAL has the same value */
+    } else {
+        if (XLENGTH(fill) != 1 || (!isNumeric(fill) && !isLogical(fill)))
+            error("altarr: 'fill' must be a single number or logical");
+        fill = PROTECT(coerceVector(fill, type));
+    }
     SEXP spec = PROTECT(allocVector(VECSXP, S_LEN));
     SET_VECTOR_ELT(spec, S_DIM, dim);
     SET_VECTOR_ELT(spec, S_CHUNK, chunk);
@@ -899,7 +1018,9 @@ static SEXP make_spec(SEXP dim, SEXP chunk, SEXP fetch, int type, SEXP store)
     REAL(state)[2] = -1;
     SET_VECTOR_ELT(spec, S_TYPE, ScalarInteger(type));
     SET_VECTOR_ELT(spec, S_STORE, store);
-    UNPROTECT(2);
+    SET_VECTOR_ELT(spec, S_PRESENT, present);
+    SET_VECTOR_ELT(spec, S_FILL, fill);
+    UNPROTECT(3);
     return spec;
 }
 
@@ -916,10 +1037,10 @@ static int type_from_name(SEXP name)
 }
 
 static SEXP C_altarr_new(SEXP dim, SEXP chunk, SEXP fetch, SEXP type,
-                         SEXP store)
+                         SEXP store, SEXP present, SEXP fill)
 {
     int t = type_from_name(type);
-    SEXP spec = PROTECT(make_spec(dim, chunk, fetch, t, store));
+    SEXP spec = PROTECT(make_spec(dim, chunk, fetch, t, store, present, fill));
     SEXP x = PROTECT(R_new_altrep(class_for(t), spec, R_NilValue));
     setAttrib(x, R_DimSymbol, duplicate(dim));
     UNPROTECT(2);
@@ -984,8 +1105,8 @@ static SEXP C_altarr_info(SEXP x)
     SEXP spec = SPEC(x);
     SEXP st = VECTOR_ELT(spec, S_STATS);
     SEXP cache = VECTOR_ELT(spec, S_CACHE);
-    SEXP out = PROTECT(allocVector(REALSXP, ST_LEN + 5));
-    SEXP nm = PROTECT(allocVector(STRSXP, ST_LEN + 5));
+    SEXP out = PROTECT(allocVector(REALSXP, ST_LEN + 6));
+    SEXP nm = PROTECT(allocVector(STRSXP, ST_LEN + 6));
     for (int i = 0; i < ST_LEN; i++) {
         REAL(out)[i] = REAL(st)[i];
         SET_STRING_ELT(nm, i, mkChar(stat_names[i]));
@@ -1003,6 +1124,11 @@ static SEXP C_altarr_info(SEXP x)
     REAL(out)[ST_LEN + 4] = cache_budget();
     SET_STRING_ELT(nm, ST_LEN + 3, mkChar("cache_bytes"));
     SET_STRING_ELT(nm, ST_LEN + 4, mkChar("cache_budget"));
+    R_xlen_t npresent = XLENGTH(cache);
+    for (R_xlen_t i = 0; i < XLENGTH(cache); i++)
+        if (is_absent(spec, i)) npresent--;
+    REAL(out)[ST_LEN + 5] = (double) npresent;
+    SET_STRING_ELT(nm, ST_LEN + 5, mkChar("chunks_present"));
     setAttrib(out, R_NamesSymbol, nm);
     UNPROTECT(2);
     return out;
@@ -1018,6 +1144,18 @@ static SEXP C_altarr_store(SEXP x)
 {
     x = check_altarr(x);
     return duplicate(VECTOR_ELT(SPEC(x), S_STORE));
+}
+
+static SEXP C_altarr_present(SEXP x)
+{
+    x = check_altarr(x);
+    return duplicate(VECTOR_ELT(SPEC(x), S_PRESENT));
+}
+
+static SEXP C_altarr_fill(SEXP x)
+{
+    x = check_altarr(x);
+    return duplicate(VECTOR_ELT(SPEC(x), S_FILL));
 }
 
 static SEXP C_altarr_reset(SEXP x, SEXP drop_cache)
@@ -1125,7 +1263,8 @@ static SEXP C_altarr_hyperslab(SEXP x, SEXP subs)
                 if (is_real) rd[i] = NA_REAL; else ri[i] = NA_INTEGER;
             } else {
                 SEXP ch = VECTOR_ELT(got, pidx);
-                if (is_real) rd[i] = REAL_RO(ch)[off]; else ri[i] = iptr_ro(ch)[off];
+                if (is_real) rd[i] = chunk_real(spec, ch, off);
+                else ri[i] = chunk_int(spec, ch, off);
             }
             for (int d = 0; d < k; d++) {
                 if (++ctr[d] < len[d]) break;
@@ -1142,7 +1281,9 @@ static SEXP C_altarr_hyperslab(SEXP x, SEXP subs)
 
 static const R_CallMethodDef CallEntries[] = {
     {"C_altarr_region", (DL_FUNC) &C_altarr_region, 3},
-    {"C_altarr_new", (DL_FUNC) &C_altarr_new, 5},
+    {"C_altarr_new", (DL_FUNC) &C_altarr_new, 7},
+    {"C_altarr_present", (DL_FUNC) &C_altarr_present, 1},
+    {"C_altarr_fill", (DL_FUNC) &C_altarr_fill, 1},
     {"C_altarr_is", (DL_FUNC) &C_altarr_is, 1},
     {"C_altarr_info", (DL_FUNC) &C_altarr_info, 1},
     {"C_altarr_reset", (DL_FUNC) &C_altarr_reset, 2},

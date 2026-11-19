@@ -1,5 +1,22 @@
 # altarr (development version)
 
+* Sparse arrays: `altarr()` takes a chunk index, `present` (a logical per
+  chunk of the grid, or a matrix of the stored chunks' coordinates), and a
+  `fill` value. Absent chunks are never passed to `fetch` and never cached;
+  every read of them gives `fill`. `sum()`, `min()` and `max()` of a double
+  array count the absent cells from the index without touching them.
+  `altarr_stats()` reports `chunks_present` and `chunks_absent`. Saved
+  recipes carry the index; older recipes load with every chunk present.
+* `altarr_present()` and `altarr_fill()` return an array's chunk index and
+  fill value.
+* `altarr_view(x, i, j, k)` is `x[i, j, k, drop = FALSE]` as a new lazy
+  array. A view of a sparse array is sparse: its chunk index is derived
+  from its source's, so nothing is read for the empty parts.
+* `altarr_zarr_v2()` lists the store once and uses the listing as the chunk
+  index: unwritten chunks read as `fill_value` without being opened.
+  `altarr_example_zarr(sparse = TRUE)` writes a store with only a diagonal
+  band of chunks. Demo: `inst/examples/sparse.R`.
+
 * `altarr()` takes `store_axes`, for an array whose chunk grid is its
   store's own: the R dimension of each stored axis, in store order
   (`rev(seq_along(dim))` for a C-order store whose shape the array
