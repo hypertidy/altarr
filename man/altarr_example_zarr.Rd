@@ -7,7 +7,8 @@
 altarr_example_zarr(
   dir = tempfile("altarr-example-", fileext = ".zarr"),
   dim = c(70L, 50L, 30L),
-  chunk = c(20L, 16L, 7L)
+  chunk = c(20L, 16L, 7L),
+  sparse = FALSE
 )
 }
 \arguments{
@@ -17,6 +18,11 @@ altarr_example_zarr(
 
 \item{chunk}{R chunk shape (the Zarr chunk shape is the reverse). Edge
 chunks are padded in the store, as Zarr requires.}
+
+\item{sparse}{if \code{TRUE}, write a sparse store: \code{fill_value} is \code{0} and
+only the chunks whose first two chunk coordinates are equal (a
+diagonal band, 20 of the default grid's 80 chunks) are written. The
+rest are absent and read as \code{0}, as Zarr reads an unwritten chunk.}
 }
 \value{
 the store path, invisibly.
@@ -39,4 +45,7 @@ path <- altarr_example_zarr()
 x <- altarr_zarr_v2(path)
 dim(x)
 x[c(1, 2, 71)]   # 0, 1, 70
+## a sparse store: most chunks were never written
+xs <- altarr_zarr_v2(altarr_example_zarr(sparse = TRUE))
+sum(altarr_present(xs))
 }

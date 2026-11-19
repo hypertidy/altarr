@@ -28,6 +28,10 @@ reference:
   contents:
   - altarr_extract
   - altarr_plan
+  - altarr_view
+- title: Sparse arrays
+  contents:
+  - altarr_present
 - title: Inspecting
   contents:
   - altarr_stats

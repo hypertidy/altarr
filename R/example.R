@@ -15,16 +15,23 @@
 #' @param dim R dimensions of the array (the Zarr shape is the reverse).
 #' @param chunk R chunk shape (the Zarr chunk shape is the reverse). Edge
 #'   chunks are padded in the store, as Zarr requires.
+#' @param sparse if `TRUE`, write a sparse store: `fill_value` is `0` and
+#'   only the chunks whose first two chunk coordinates are equal (a
+#'   diagonal band, 20 of the default grid's 80 chunks) are written. The
+#'   rest are absent and read as `0`, as Zarr reads an unwritten chunk.
 #' @return the store path, invisibly.
 #' @examples
 #' path <- altarr_example_zarr()
 #' x <- altarr_zarr_v2(path)
 #' dim(x)
 #' x[c(1, 2, 71)]   # 0, 1, 70
+#' ## a sparse store: most chunks were never written
+#' xs <- altarr_zarr_v2(altarr_example_zarr(sparse = TRUE))
+#' sum(altarr_present(xs))
 #' @export
 altarr_example_zarr <- function(dir = tempfile("altarr-example-", fileext = ".zarr"),
                                 dim = c(70L, 50L, 30L),
-                                chunk = c(20L, 16L, 7L)) {
+                                chunk = c(20L, 16L, 7L), sparse = FALSE) {
   dim <- as.integer(dim)
   chunk <- rep_len(as.integer(chunk), length(dim))
   dir.create(dir, showWarnings = FALSE, recursive = TRUE)
@@ -34,7 +41,7 @@ altarr_example_zarr <- function(dir = tempfile("altarr-example-", fileext = ".za
     sprintf('  "shape": %s,', json_int(rev(dim))),
     sprintf('  "chunks": %s,', json_int(rev(chunk))),
     '  "dtype": "<f8",',
-    '  "fill_value": -9999.0,',
+    if (sparse) '  "fill_value": 0.0,' else '  "fill_value": -9999.0,',
     '  "order": "C",',
     '  "filters": null,',
     '  "dimension_separator": ".",',
@@ -48,6 +55,7 @@ altarr_example_zarr <- function(dir = tempfile("altarr-example-", fileext = ".za
   grid <- as.matrix(expand.grid(lapply(nch, function(n) seq_len(n) - 1L)))
   for (r in seq_len(nrow(grid))) {
     cc <- grid[r, ]
+    if (sparse && length(cc) > 1L && cc[1L] != cc[2L]) next
     st <- cc * chunk + 1L
     ## padded full-size chunk: every cell's global 1-based coordinates;
     ## cells past the array edge hold the fill value

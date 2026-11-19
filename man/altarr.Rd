@@ -10,7 +10,9 @@ altarr(
   fetch,
   dimnames = NULL,
   type = c("double", "integer", "logical"),
-  store_axes = NULL
+  store_axes = NULL,
+  present = NULL,
+  fill = NA
 )
 }
 \arguments{
@@ -38,6 +40,18 @@ R agree. \code{\link[=altarr_plan]{altarr_plan()}} then names each chunk by its 
 not the store's (a window, a view, a rechunking): the plan then has no
 keys. It changes nothing about fetching: \code{fetch} is always given chunk
 coordinates in R's dimension order.}
+
+\item{present}{optional chunk index: which chunks the store holds. Either
+a logical vector (or array) with one element per chunk of the grid, in
+column-major order over the grid (\code{TRUE} = stored), or an integer matrix
+of 0-based chunk coordinates of the stored chunks, one row per chunk, in
+R's dimension order (the same form \code{fetch} receives). Chunks not stored
+are never passed to \code{fetch}: every value in them is \code{fill}, as Zarr
+reads an unwritten chunk as its \code{fill_value}. \code{NULL} (the default)
+means every chunk is stored.}
+
+\item{fill}{the value of every cell of an absent chunk, coerced to
+\code{type}. Defaults to \code{NA}. Used only with \code{present}.}
 }
 \value{
 a lazy array.
@@ -70,4 +84,9 @@ sum(xi)
 ## and the plan carries the store's chunk keys
 xs <- altarr(d, cs, fetch, store_axes = 2:1)
 altarr_plan(xs, 9:10, 1:4)
+## a sparse store: only two of the 12 chunks were ever written; the
+## rest read as 0 and are never fetched
+xp <- altarr(d, cs, fetch, present = rbind(c(0L, 0L), c(2L, 2L)), fill = 0)
+sum(xp)                                  # only the two stored chunks
+altarr_stats(xp)[c("chunks_fetched", "chunks_absent", "chunks_present")]
 }

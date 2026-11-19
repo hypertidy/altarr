@@ -23,6 +23,16 @@
 #'   not the store's (a window, a view, a rechunking): the plan then has no
 #'   keys. It changes nothing about fetching: `fetch` is always given chunk
 #'   coordinates in R's dimension order.
+#' @param present optional chunk index: which chunks the store holds. Either
+#'   a logical vector (or array) with one element per chunk of the grid, in
+#'   column-major order over the grid (`TRUE` = stored), or an integer matrix
+#'   of 0-based chunk coordinates of the stored chunks, one row per chunk, in
+#'   R's dimension order (the same form `fetch` receives). Chunks not stored
+#'   are never passed to `fetch`: every value in them is `fill`, as Zarr
+#'   reads an unwritten chunk as its `fill_value`. `NULL` (the default)
+#'   means every chunk is stored.
+#' @param fill the value of every cell of an absent chunk, coerced to
+#'   `type`. Defaults to `NA`. Used only with `present`.
 #' @return a lazy array.
 #' @examples
 #' ## a 10 x 7 array in 4 x 3 chunks; each value is its own position
@@ -47,14 +57,23 @@
 #' ## and the plan carries the store's chunk keys
 #' xs <- altarr(d, cs, fetch, store_axes = 2:1)
 #' altarr_plan(xs, 9:10, 1:4)
+#' ## a sparse store: only two of the 12 chunks were ever written; the
+#' ## rest read as 0 and are never fetched
+#' xp <- altarr(d, cs, fetch, present = rbind(c(0L, 0L), c(2L, 2L)), fill = 0)
+#' sum(xp)                                  # only the two stored chunks
+#' altarr_stats(xp)[c("chunks_fetched", "chunks_absent", "chunks_present")]
 #' @export
 altarr <- function(dim, chunk, fetch, dimnames = NULL,
                    type = c("double", "integer", "logical"),
-                   store_axes = NULL) {
+                   store_axes = NULL, present = NULL, fill = NA) {
   type <- match.arg(type)
   dim <- as.integer(dim)
   chunk <- rep_len(as.integer(chunk), length(dim))
   fetch <- match.fun(fetch)
+  if (!is.null(present)) present <- .chunk_index(present, dim, chunk)
+  if (length(fill) != 1L || !(is.numeric(fill) || is.logical(fill))) {
+    stop("'fill' must be a single number or logical", call. = FALSE)
+  }
   if (!is.null(store_axes)) {
     if (!is.numeric(store_axes) || anyNA(store_axes) ||
         !setequal(store_axes, seq_along(dim)) ||
@@ -65,7 +84,8 @@ altarr <- function(dim, chunk, fetch, dimnames = NULL,
     }
     store_axes <- as.integer(store_axes)
   }
-  x <- .Call(C_altarr_new, dim, chunk, fetch, type, store_axes)
+  x <- .Call(C_altarr_new, dim, chunk, fetch, type, store_axes, present,
+             fill)
   if (!is.null(dimnames)) dimnames(x) <- dimnames
   x
 }
@@ -229,4 +249,130 @@ altarr_plan <- function(x, ...) {
     plan <- cbind(as.data.frame(keys), plan)
   }
   plan
+}
+
+## 'present' as given to altarr(): a logical over the chunk grid, or a
+## matrix of 0-based coordinates of the stored chunks. Returns a plain
+## logical vector, one element per chunk, column-major over the grid.
+.chunk_index <- function(present, dim, chunk) {
+  nch <- (dim + chunk - 1L) %/% chunk
+  total <- prod(nch)
+  if (is.matrix(present) && is.numeric(present)) {
+    if (ncol(present) != length(dim)) {
+      stop("a 'present' matrix needs one column per dimension", call. = FALSE)
+    }
+    cc <- matrix(as.integer(present), ncol = ncol(present))
+    if (anyNA(cc) || any(cc < 0L) || any(sweep(cc, 2L, nch, ">="))) {
+      stop("'present' has chunk coordinates outside the chunk grid",
+           call. = FALSE)
+    }
+    out <- logical(total)
+    if (nrow(cc)) {
+      stride <- cumprod(c(1, nch[-length(nch)]))
+      out[as.vector(cc %*% stride) + 1] <- TRUE
+    }
+    return(out)
+  }
+  if (!is.logical(present) || length(present) != total || anyNA(present)) {
+    stop("'present' must be a logical with one element per chunk (",
+         total, "), or a matrix of chunk coordinates", call. = FALSE)
+  }
+  as.vector(present)
+}
+
+#' The chunk index of a sparse array
+#'
+#' `altarr_present()` gives which chunks of the grid the store holds, as a
+#' logical array with one element per chunk (dimensions are the chunk grid),
+#' or `NULL` if the array has no chunk index (every chunk stored).
+#' `altarr_fill()` gives the value of every cell of an absent chunk.
+#'
+#' Absent chunks cost nothing: they are never fetched or cached. Indexing
+#' writes `fill` for them, and `sum()`, `min()` and `max()` of a double
+#' array account for them from the index alone, without iterating cells.
+#' `altarr_stats()` reports `chunks_present` (in the index) and
+#' `chunks_absent` (absent chunks that requests touched and answered
+#' without a fetch).
+#' @param x an altarr array
+#' @return a logical array over the chunk grid, or `NULL`; for
+#'   `altarr_fill()`, a length-one vector of the array's type.
+#' @examples
+#' x <- altarr_zarr_v2(altarr_example_zarr(sparse = TRUE))
+#' p <- altarr_present(x)
+#' dim(p)
+#' sum(p)        # chunks stored
+#' altarr_fill(x)
+#' @export
+altarr_present <- function(x) {
+  p <- .Call(C_altarr_present, x)
+  if (is.null(p)) return(NULL)
+  chunk <- .Call(C_altarr_chunk, x)
+  dim(p) <- (dim(x) + chunk - 1L) %/% chunk
+  p
+}
+
+#' @rdname altarr_present
+#' @export
+altarr_fill <- function(x) .Call(C_altarr_fill, x)
+
+#' A lazy subset that stays lazy (and sparse)
+#'
+#' `altarr_view(x, i, j, k)` is `x[i, j, k, drop = FALSE]` as a new lazy
+#' array: nothing is read when it is made. Its chunks have the same shape
+#' as `x`'s, laid over the subset, and each is read with one
+#' [altarr_extract()] of `x`. If `x` has a chunk index (`present`), the
+#' view gets one too: a view chunk is absent when every chunk of `x` it
+#' draws from is absent, so a subset of a sparse array is still sparse, and
+#' `sum()` of it is still answered from the index for the empty parts.
+#'
+#' This is what an `ArraySubset` ALTREP method could return instead of a
+#' dense result: a method that receives `x[i, j, k]`'s normalized
+#' subscripts can hand back any vector, including another lazy one.
+#' @inheritParams altarr_extract
+#' @return a lazy array (an altarr), with `dim` the lengths of the
+#'   subscripts. Dimnames are kept.
+#' @examples
+#' x <- altarr_zarr_v2(altarr_example_zarr(sparse = TRUE))
+#' v <- altarr_view(x, 1:50, , 1:10)
+#' is_altarr(v)
+#' sum(altarr_present(v)); length(altarr_present(v))
+#' all.equal(sum(v, na.rm = TRUE), sum(x[1:50, , 1:10], na.rm = TRUE))
+#' @export
+altarr_view <- function(x, ...) {
+  subs <- .norm_subs(x, as.list(substitute(list(...)))[-1L], parent.frame())
+  force(x)
+  d <- lengths(subs)
+  if (any(d == 0L)) stop("altarr_view() needs a non-empty subset", call. = FALSE)
+  if (any(vapply(subs, anyNA, logical(1)))) {
+    stop("altarr_view() does not take NA subscripts", call. = FALSE)
+  }
+  cs <- pmin(.Call(C_altarr_chunk, x), d)
+  ## view chunk q along dimension k covers subs[[k]][block(q)]
+  blocks <- Map(function(s, c) split(s, (seq_along(s) - 1L) %/% c), subs, cs)
+  fetch <- function(chunks) {
+    lapply(seq_len(nrow(chunks)), function(r) {
+      idx <- Map(function(b, q) b[[q + 1L]], blocks, chunks[r, ])
+      as.vector(.Call(C_altarr_hyperslab, x, idx))
+    })
+  }
+  src_present <- altarr_present(x)
+  present <- NULL
+  if (!is.null(src_present)) {
+    src_cs <- .Call(C_altarr_chunk, x)
+    ## per dimension, the source chunk coordinates each view chunk touches
+    touch <- Map(function(b, c) lapply(b, function(s) unique((s - 1L) %/% c) + 1L),
+                 blocks, src_cs)
+    grid <- as.matrix(expand.grid(lapply(lengths(blocks), seq_len)))
+    present <- vapply(seq_len(nrow(grid)), function(g) {
+      idx <- Map(function(t, q) t[[q]], touch, grid[g, ])
+      any(do.call(`[`, c(list(src_present), idx, list(drop = FALSE))))
+    }, logical(1))
+  }
+  dn <- dimnames(x)
+  if (!is.null(dn)) {
+    dn <- Map(function(n, s) if (is.null(n)) NULL else n[s], dn, subs)
+    names(dn) <- names(dimnames(x))
+  }
+  altarr(d, cs, fetch, dimnames = dn, type = typeof(x), present = present,
+         fill = altarr_fill(x))
 }
