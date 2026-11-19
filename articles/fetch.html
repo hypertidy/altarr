@@ -338,7 +338,7 @@ factory that keeps only what is needed to re-open the source, and
 <span><span class="va">f</span> <span class="op">&lt;-</span> <span class="fu"><a href="https://rdrr.io/r/base/tempfile.html" class="external-link">tempfile</a></span><span class="op">(</span>fileext <span class="op">=</span> <span class="st">".rds"</span><span class="op">)</span></span>
 <span><span class="fu"><a href="https://rdrr.io/r/base/readRDS.html" class="external-link">saveRDS</a></span><span class="op">(</span><span class="va">z</span>, <span class="va">f</span><span class="op">)</span></span>
 <span><span class="fu"><a href="https://rdrr.io/r/base/file.info.html" class="external-link">file.size</a></span><span class="op">(</span><span class="va">f</span><span class="op">)</span>   <span class="co"># bytes, for 120,000 values</span></span>
-<span><span class="co">#&gt; [1] 369</span></span></code></pre></div>
+<span><span class="co">#&gt; [1] 386</span></span></code></pre></div>
 <p>Two traps:</p>
 <ul>
 <li>A fetch defined at top level refers to the global environment, which

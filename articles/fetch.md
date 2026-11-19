@@ -308,7 +308,7 @@ z <- altarr(c(400L, 300L), c(64L, 64L),
 f <- tempfile(fileext = ".rds")
 saveRDS(z, f)
 file.size(f)   # bytes, for 120,000 values
-#> [1] 369
+#> [1] 386
 ```
 
 Two traps:

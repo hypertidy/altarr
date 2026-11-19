@@ -58,7 +58,8 @@ are hidden files, which R packages should not carry.</p>
     <div class="sourceCode"><pre class="sourceCode r"><code><span><span class="fu">altarr_example_zarr</span><span class="op">(</span></span>
 <span>  dir <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/tempfile.html" class="external-link">tempfile</a></span><span class="op">(</span><span class="st">"altarr-example-"</span>, fileext <span class="op">=</span> <span class="st">".zarr"</span><span class="op">)</span>,</span>
 <span>  dim <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="fl">70L</span>, <span class="fl">50L</span>, <span class="fl">30L</span><span class="op">)</span>,</span>
-<span>  chunk <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="fl">20L</span>, <span class="fl">16L</span>, <span class="fl">7L</span><span class="op">)</span></span>
+<span>  chunk <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="fl">20L</span>, <span class="fl">16L</span>, <span class="fl">7L</span><span class="op">)</span>,</span>
+<span>  sparse <span class="op">=</span> <span class="cn">FALSE</span></span>
 <span><span class="op">)</span></span></code></pre></div>
     </div>
 
@@ -77,6 +78,13 @@ are hidden files, which R packages should not carry.</p>
 <dt id="arg-chunk">chunk<a class="anchor" aria-label="anchor" href="#arg-chunk"></a></dt>
 <dd><p>R chunk shape (the Zarr chunk shape is the reverse). Edge
 chunks are padded in the store, as Zarr requires.</p></dd>
+
+
+<dt id="arg-sparse">sparse<a class="anchor" aria-label="anchor" href="#arg-sparse"></a></dt>
+<dd><p>if <code>TRUE</code>, write a sparse store: <code>fill_value</code> is <code>0</code> and
+only the chunks whose first two chunk coordinates are equal (a
+diagonal band, 20 of the default grid's 80 chunks) are written. The
+rest are absent and read as <code>0</code>, as Zarr reads an unwritten chunk.</p></dd>
 
 </dl></div>
     <div class="section level2">
@@ -100,6 +108,10 @@ result can be checked by eye: in the array returned by
 <span class="r-out co"><span class="r-pr">#&gt;</span> [1] 70 50 30</span>
 <span class="r-in"><span><span class="va">x</span><span class="op">[</span><span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="fl">1</span>, <span class="fl">2</span>, <span class="fl">71</span><span class="op">)</span><span class="op">]</span>   <span class="co"># 0, 1, 70</span></span></span>
 <span class="r-out co"><span class="r-pr">#&gt;</span> [1]  0  1 70</span>
+<span class="r-in"><span><span class="co">## a sparse store: most chunks were never written</span></span></span>
+<span class="r-in"><span><span class="va">xs</span> <span class="op">&lt;-</span> <span class="fu"><a href="altarr_zarr_v2.html">altarr_zarr_v2</a></span><span class="op">(</span><span class="fu">altarr_example_zarr</span><span class="op">(</span>sparse <span class="op">=</span> <span class="cn">TRUE</span><span class="op">)</span><span class="op">)</span></span></span>
+<span class="r-in"><span><span class="fu"><a href="https://rdrr.io/r/base/sum.html" class="external-link">sum</a></span><span class="op">(</span><span class="fu"><a href="altarr_present.html">altarr_present</a></span><span class="op">(</span><span class="va">xs</span><span class="op">)</span><span class="op">)</span></span></span>
+<span class="r-out co"><span class="r-pr">#&gt;</span> [1] 20</span>
 </code></pre></div>
     </div>
   </main><aside class="col-md-3"><nav id="toc" aria-label="Table of contents"><h2>On this page</h2>

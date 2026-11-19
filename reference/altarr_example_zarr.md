@@ -13,7 +13,8 @@ carry.
 altarr_example_zarr(
   dir = tempfile("altarr-example-", fileext = ".zarr"),
   dim = c(70L, 50L, 30L),
-  chunk = c(20L, 16L, 7L)
+  chunk = c(20L, 16L, 7L),
+  sparse = FALSE
 )
 ```
 
@@ -31,6 +32,13 @@ altarr_example_zarr(
 
   R chunk shape (the Zarr chunk shape is the reverse). Edge chunks are
   padded in the store, as Zarr requires.
+
+- sparse:
+
+  if `TRUE`, write a sparse store: `fill_value` is `0` and only the
+  chunks whose first two chunk coordinates are equal (a diagonal band,
+  20 of the default grid's 80 chunks) are written. The rest are absent
+  and read as `0`, as Zarr reads an unwritten chunk.
 
 ## Value
 
@@ -54,4 +62,8 @@ dim(x)
 #> [1] 70 50 30
 x[c(1, 2, 71)]   # 0, 1, 70
 #> [1]  0  1 70
+## a sparse store: most chunks were never written
+xs <- altarr_zarr_v2(altarr_example_zarr(sparse = TRUE))
+sum(altarr_present(xs))
+#> [1] 20
 ```

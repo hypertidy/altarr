@@ -30,6 +30,16 @@ a lazy array, see
 
 ## Details
 
+The store is listed once, when the array is made, and that listing is
+the array's chunk index (`present` in
+[`altarr()`](https://hypertidy.github.io/altarr/reference/altarr.md)): a
+chunk with no file is never read, its cells are `fill_value` (decoded as
+below), and [`sum()`](https://rdrr.io/r/base/sum.html),
+[`min()`](https://rdrr.io/r/base/Extremes.html) and
+[`max()`](https://rdrr.io/r/base/Extremes.html) count them from the
+index. See
+[`altarr_present()`](https://hypertidy.github.io/altarr/reference/altarr_present.md).
+
 This is a demonstration, not a Zarr implementation: no Zarr v3, no
 remote stores, no other codecs. For real stores, use a full Zarr reader
 and hand its chunk reads to

@@ -58,7 +58,9 @@ by chunk from <code>fetch</code> only when base R asks for them.</p>
 <span>  <span class="va">fetch</span>,</span>
 <span>  dimnames <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  type <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"double"</span>, <span class="st">"integer"</span>, <span class="st">"logical"</span><span class="op">)</span>,</span>
-<span>  store_axes <span class="op">=</span> <span class="cn">NULL</span></span>
+<span>  store_axes <span class="op">=</span> <span class="cn">NULL</span>,</span>
+<span>  present <span class="op">=</span> <span class="cn">NULL</span>,</span>
+<span>  fill <span class="op">=</span> <span class="cn">NA</span></span>
 <span><span class="op">)</span></span></code></pre></div>
     </div>
 
@@ -102,6 +104,22 @@ not the store's (a window, a view, a rechunking): the plan then has no
 keys. It changes nothing about fetching: <code>fetch</code> is always given chunk
 coordinates in R's dimension order.</p></dd>
 
+
+<dt id="arg-present">present<a class="anchor" aria-label="anchor" href="#arg-present"></a></dt>
+<dd><p>optional chunk index: which chunks the store holds. Either
+a logical vector (or array) with one element per chunk of the grid, in
+column-major order over the grid (<code>TRUE</code> = stored), or an integer matrix
+of 0-based chunk coordinates of the stored chunks, one row per chunk, in
+R's dimension order (the same form <code>fetch</code> receives). Chunks not stored
+are never passed to <code>fetch</code>: every value in them is <code>fill</code>, as Zarr
+reads an unwritten chunk as its <code>fill_value</code>. <code>NULL</code> (the default)
+means every chunk is stored.</p></dd>
+
+
+<dt id="arg-fill">fill<a class="anchor" aria-label="anchor" href="#arg-fill"></a></dt>
+<dd><p>the value of every cell of an absent chunk, coerced to
+<code>type</code>. Defaults to <code>NA</code>. Used only with <code>present</code>.</p></dd>
+
 </dl></div>
     <div class="section level2">
     <h2 id="value">Value<a class="anchor" aria-label="anchor" href="#value"></a></h2>
@@ -141,6 +159,14 @@ coordinates in R's dimension order.</p></dd>
 <span class="r-out co"><span class="r-pr">#&gt;</span>   dim_0 dim_1 d1 d2 d1_start d1_n d2_start d2_n</span>
 <span class="r-out co"><span class="r-pr">#&gt;</span> 1     0     2  2  0        9    2        1    3</span>
 <span class="r-out co"><span class="r-pr">#&gt;</span> 2     1     2  2  1        9    2        4    3</span>
+<span class="r-in"><span><span class="co">## a sparse store: only two of the 12 chunks were ever written; the</span></span></span>
+<span class="r-in"><span><span class="co">## rest read as 0 and are never fetched</span></span></span>
+<span class="r-in"><span><span class="va">xp</span> <span class="op">&lt;-</span> <span class="fu">altarr</span><span class="op">(</span><span class="va">d</span>, <span class="va">cs</span>, <span class="va">fetch</span>, present <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/cbind.html" class="external-link">rbind</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="fl">0L</span>, <span class="fl">0L</span><span class="op">)</span>, <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="fl">2L</span>, <span class="fl">2L</span><span class="op">)</span><span class="op">)</span>, fill <span class="op">=</span> <span class="fl">0</span><span class="op">)</span></span></span>
+<span class="r-in"><span><span class="fu"><a href="https://rdrr.io/r/base/sum.html" class="external-link">sum</a></span><span class="op">(</span><span class="va">xp</span><span class="op">)</span>                                  <span class="co"># only the two stored chunks</span></span></span>
+<span class="r-out co"><span class="r-pr">#&gt;</span> [1] 289</span>
+<span class="r-in"><span><span class="fu"><a href="altarr_stats.html">altarr_stats</a></span><span class="op">(</span><span class="va">xp</span><span class="op">)</span><span class="op">[</span><span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"chunks_fetched"</span>, <span class="st">"chunks_absent"</span>, <span class="st">"chunks_present"</span><span class="op">)</span><span class="op">]</span></span></span>
+<span class="r-out co"><span class="r-pr">#&gt;</span> chunks_fetched  chunks_absent chunks_present </span>
+<span class="r-out co"><span class="r-pr">#&gt;</span>              2              7              2 </span>
 </code></pre></div>
     </div>
   </main><aside class="col-md-3"><nav id="toc" aria-label="Table of contents"><h2>On this page</h2>

@@ -13,6 +13,14 @@
   : Rectangular (hyperslab) extraction with one planned fetch
 - [`altarr_plan()`](https://hypertidy.github.io/altarr/reference/altarr_plan.md)
   : The chunk plan for a subscript, as a data frame
+- [`altarr_view()`](https://hypertidy.github.io/altarr/reference/altarr_view.md)
+  : A lazy subset that stays lazy (and sparse)
+
+## Sparse arrays
+
+- [`altarr_present()`](https://hypertidy.github.io/altarr/reference/altarr_present.md)
+  [`altarr_fill()`](https://hypertidy.github.io/altarr/reference/altarr_present.md)
+  : The chunk index of a sparse array
 
 ## Inspecting
 

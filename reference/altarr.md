@@ -13,7 +13,9 @@ altarr(
   fetch,
   dimnames = NULL,
   type = c("double", "integer", "logical"),
-  store_axes = NULL
+  store_axes = NULL,
+  present = NULL,
+  fill = NA
 )
 ```
 
@@ -59,6 +61,22 @@ altarr(
   nothing about fetching: `fetch` is always given chunk coordinates in
   R's dimension order.
 
+- present:
+
+  optional chunk index: which chunks the store holds. Either a logical
+  vector (or array) with one element per chunk of the grid, in
+  column-major order over the grid (`TRUE` = stored), or an integer
+  matrix of 0-based chunk coordinates of the stored chunks, one row per
+  chunk, in R's dimension order (the same form `fetch` receives). Chunks
+  not stored are never passed to `fetch`: every value in them is `fill`,
+  as Zarr reads an unwritten chunk as its `fill_value`. `NULL` (the
+  default) means every chunk is stored.
+
+- fill:
+
+  the value of every cell of an absent chunk, coerced to `type`.
+  Defaults to `NA`. Used only with `present`.
+
 ## Value
 
 a lazy array.
@@ -97,4 +115,12 @@ altarr_plan(xs, 9:10, 1:4)
 #>   dim_0 dim_1 d1 d2 d1_start d1_n d2_start d2_n
 #> 1     0     2  2  0        9    2        1    3
 #> 2     1     2  2  1        9    2        4    3
+## a sparse store: only two of the 12 chunks were ever written; the
+## rest read as 0 and are never fetched
+xp <- altarr(d, cs, fetch, present = rbind(c(0L, 0L), c(2L, 2L)), fill = 0)
+sum(xp)                                  # only the two stored chunks
+#> [1] 289
+altarr_stats(xp)[c("chunks_fetched", "chunks_absent", "chunks_present")]
+#> chunks_fetched  chunks_absent chunks_present 
+#>              2              7              2 
 ```

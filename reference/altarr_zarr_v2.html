@@ -80,7 +80,12 @@ files (read as <code>fill_value</code>). Zarr's padded edge chunks are clipped.<
     </div>
     <div class="section level2">
     <h2 id="details">Details<a class="anchor" aria-label="anchor" href="#details"></a></h2>
-    <p>This is a demonstration, not a Zarr implementation: no Zarr v3, no
+    <p>The store is listed once, when the array is made, and that listing is
+the array's chunk index (<code>present</code> in <code><a href="altarr.html">altarr()</a></code>): a chunk with no file
+is never read, its cells are <code>fill_value</code> (decoded as below), and
+<code><a href="https://rdrr.io/r/base/sum.html" class="external-link">sum()</a></code>, <code><a href="https://rdrr.io/r/base/Extremes.html" class="external-link">min()</a></code> and <code><a href="https://rdrr.io/r/base/Extremes.html" class="external-link">max()</a></code> count them from the index. See
+<code><a href="altarr_present.html">altarr_present()</a></code>.</p>
+<p>This is a demonstration, not a Zarr implementation: no Zarr v3, no
 remote stores, no other codecs. For real stores, use a full Zarr reader
 and hand its chunk reads to <code><a href="altarr.html">altarr()</a></code> as the fetch function.</p>
 <p>The array's type follows the dtype: floats give a double array, integers
